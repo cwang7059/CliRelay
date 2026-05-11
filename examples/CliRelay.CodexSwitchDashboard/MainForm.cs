@@ -1,607 +1,1110 @@
-using System.Diagnostics;
-using System.Net.Http;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Windows.Forms;
-
 namespace CliRelay.CodexSwitchDashboard;
 
-public sealed class MainForm : Form
+internal sealed class MainForm : Form
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        WriteIndented = true
-    };
+    private const string OverviewPageKey = "overview";
 
-    private readonly HttpClient _httpClient = new()
-    {
-        Timeout = TimeSpan.FromSeconds(15)
-    };
+    private readonly UserPreferencesStore _preferencesStore = new();
+    private readonly UserPreferences _preferences;
+    private readonly ManagementApiClient _client = new();
+    private readonly Dictionary<string, ManagementPageBase> _pages = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Button> _navButtons = new(StringComparer.OrdinalIgnoreCase);
 
-    private readonly TextBox _baseUrlTextBox = new();
-    private readonly Button _refreshButton = new();
-    private readonly Button _reconcileButton = new();
-    private readonly Button _openManageButton = new();
-    private readonly CheckBox _onlyCodexCheckBox = new();
-    private readonly Label _quotaSwitchProjectLabel = new();
-    private readonly Label _quotaSwitchPreviewLabel = new();
-    private readonly Label _fingerprintLabel = new();
-    private readonly Label _statusLabel = new();
-    private readonly DataGridView _grid = new();
-    private readonly TextBox _detailsTextBox = new();
+    private DashboardThemeMode _themeMode;
+    private bool _sidebarCollapsed;
+    private bool _signingIn;
+    private string _currentPageKey = OverviewPageKey;
+    private bool _showManagementKey;
 
-    private IReadOnlyList<AuthFileEntry> _allEntries = Array.Empty<AuthFileEntry>();
+    private AmbientBackgroundPanel _loginScene = null!;
+    private AmbientBackgroundPanel _appScene = null!;
+
+    private Button _loginThemeButton = null!;
+    private RoundedSurfacePanel _baseUrlInputShell = null!;
+    private RoundedSurfacePanel _managementKeyInputShell = null!;
+    private TextBox _baseUrlTextBox = null!;
+    private TextBox _managementKeyTextBox = null!;
+    private Button _showManagementKeyButton = null!;
+    private CheckBox _rememberKeyCheckBox = null!;
+    private Button _signInButton = null!;
+    private Label _managementEndpointLabel = null!;
+    private Label _loginStatusLabel = null!;
+    private Label _heroTitleLabel = null!;
+    private Label _heroDescriptionLabel = null!;
+    private Label _brandNameLabel = null!;
+
+    private Panel _sidebarHost = null!;
+    private RoundedSurfacePanel _sidebarSurface = null!;
+    private Label _sidebarBrandTitleLabel = null!;
+    private Label _sidebarBrandSubtitleLabel = null!;
+    private TableLayoutPanel _sidebarNavLayout = null!;
+    private Label _sidebarFooterTitleLabel = null!;
+    private Label _sidebarFooterSubtitleLabel = null!;
+
+    private RoundedSurfacePanel _headerSurface = null!;
+    private Label _shellTitleLabel = null!;
+    private Label _shellSubtitleLabel = null!;
+    private Label _statusLabel = null!;
+    private Button _sidebarToggleButton = null!;
+    private Button _refreshButton = null!;
+    private Button _shellThemeButton = null!;
+    private Button _logoutButton = null!;
+    private Panel _contentHost = null!;
 
     public MainForm()
     {
-        Text = "CliRelay Codex Switch Dashboard";
-        MinimumSize = new Size(1180, 760);
-        StartPosition = FormStartPosition.CenterScreen;
+        _preferences = _preferencesStore.Load();
+        _themeMode = _preferences.ThemeMode;
+        _sidebarCollapsed = _preferences.SidebarCollapsed;
 
-        var shell = new TableLayoutPanel
+        Text = "CliRelay Codex Console";
+        StartPosition = FormStartPosition.CenterScreen;
+        MinimumSize = new Size(1360, 860);
+        ClientSize = new Size(1480, 920);
+        FormBorderStyle = FormBorderStyle.Sizable;
+
+        BuildChrome();
+        LoadPreferencesIntoLogin();
+        ApplyTheme();
+        ShowLoginScene();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _client.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private void BuildChrome()
+    {
+        SuspendLayout();
+
+        _loginScene = BuildLoginScene();
+        _appScene = BuildAppScene();
+
+        Controls.Add(_appScene);
+        Controls.Add(_loginScene);
+
+        ResumeLayout(false);
+    }
+
+    private AmbientBackgroundPanel BuildLoginScene()
+    {
+        var scene = new AmbientBackgroundPanel
+        {
+            Dock = DockStyle.Fill,
+            Scene = BackgroundScene.Login,
+            ThemeMode = _themeMode
+        };
+
+        var themeHost = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 72,
+            Padding = new Padding(0, 20, 24, 0),
+            BackColor = Color.Transparent
+        };
+        _loginThemeButton = new Button
+        {
+            Dock = DockStyle.Right,
+            Width = 108,
+            Height = 40,
+            Text = string.Empty
+        };
+        _loginThemeButton.Click += (_, _) => ToggleTheme();
+        themeHost.Controls.Add(_loginThemeButton);
+        scene.Controls.Add(themeHost);
+
+        var rootPadding = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(52, 8, 52, 44),
+            BackColor = Color.Transparent
+        };
+        scene.Controls.Add(rootPadding);
+
+        var contentGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            BackColor = Color.Transparent
+        };
+        contentGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 54f));
+        contentGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46f));
+        rootPadding.Controls.Add(contentGrid);
+
+        contentGrid.Controls.Add(BuildLoginHero(), 0, 0);
+        contentGrid.Controls.Add(BuildLoginCard(), 1, 0);
+
+        return scene;
+    }
+
+    private Control BuildLoginHero()
+    {
+        var host = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8, 40, 28, 40),
+            BackColor = Color.Transparent
+        };
+
+        var brandRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Location = new Point(0, 0),
+            BackColor = Color.Transparent
+        };
+        var brandBadge = new RoundedSurfacePanel
+        {
+            Size = new Size(46, 46),
+            CornerRadius = 18,
+            BorderWidth = 1,
+            Margin = new Padding(0, 0, 12, 0)
+        };
+        var badgeText = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "CP",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = DashboardStyles.CreateFont(11f, FontStyle.Bold)
+        };
+        brandBadge.Controls.Add(badgeText);
+        brandRow.Controls.Add(brandBadge);
+
+        _brandNameLabel = new Label
+        {
+            AutoSize = true,
+            Text = "Code Proxy",
+            Font = DashboardStyles.CreateFont(15f, FontStyle.Bold),
+            Margin = new Padding(0, 11, 0, 0)
+        };
+        brandRow.Controls.Add(_brandNameLabel);
+        host.Controls.Add(brandRow);
+
+        _heroTitleLabel = new Label
+        {
+            AutoSize = false,
+            Location = new Point(0, 108),
+            MaximumSize = new Size(640, 0),
+            Size = new Size(640, 180),
+            Text = "Control every provider\nfrom one calm console",
+            Font = DashboardStyles.CreateFont(31f, FontStyle.Bold)
+        };
+        host.Controls.Add(_heroTitleLabel);
+
+        _heroDescriptionLabel = new Label
+        {
+            AutoSize = false,
+            Location = new Point(0, 308),
+            MaximumSize = new Size(580, 0),
+            Size = new Size(580, 110),
+            Text = "Use the management key to connect your CliRelay node, review account health, switch Codex auths, and keep the whole proxy layer in one predictable place.",
+            Font = DashboardStyles.CreateFont(10.5f, FontStyle.Regular)
+        };
+        host.Controls.Add(_heroDescriptionLabel);
+
+        var trustedLabel = new Label
+        {
+            AutoSize = true,
+            Location = new Point(0, 448),
+            Text = "PROVIDER COVERAGE",
+            Font = DashboardStyles.CreateFont(8.5f, FontStyle.Bold)
+        };
+        host.Controls.Add(trustedLabel);
+
+        var providers = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Location = new Point(0, 480),
+            MaximumSize = new Size(620, 0),
+            BackColor = Color.Transparent
+        };
+        providers.Controls.Add(DashboardStyles.CreatePill("OpenAI", Color.Transparent, Color.Empty));
+        providers.Controls.Add(DashboardStyles.CreatePill("Gemini", Color.Transparent, Color.Empty));
+        providers.Controls.Add(DashboardStyles.CreatePill("Claude", Color.Transparent, Color.Empty));
+        providers.Controls.Add(DashboardStyles.CreatePill("Vertex", Color.Transparent, Color.Empty));
+        host.Controls.Add(providers);
+
+        return host;
+    }
+
+    private Control BuildLoginCard()
+    {
+        var host = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent,
+            Padding = new Padding(30, 24, 0, 24)
+        };
+
+        var card = new RoundedSurfacePanel
+        {
+            Dock = DockStyle.Fill,
+            CornerRadius = 34,
+            BorderWidth = 1,
+            Padding = new Padding(34, 32, 34, 28)
+        };
+        host.Controls.Add(card);
+
+        var titleLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 54,
+            Text = "Sign in",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = DashboardStyles.CreateFont(21f, FontStyle.Bold)
+        };
+        card.Controls.Add(titleLabel);
+
+        var stack = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
-            Padding = new Padding(12)
-        };
-        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 62));
-        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
-        Controls.Add(shell);
-
-        shell.Controls.Add(BuildToolbar(), 0, 0);
-        shell.Controls.Add(BuildSummaryPanel(), 0, 1);
-        shell.Controls.Add(BuildGridPanel(), 0, 2);
-        shell.Controls.Add(BuildDetailsPanel(), 0, 3);
-
-        _refreshButton.Click += async (_, _) => await RefreshDashboardAsync();
-        _reconcileButton.Click += async (_, _) => await ReconcileSelectedAsync();
-        _openManageButton.Click += (_, _) => OpenManagePage();
-        _onlyCodexCheckBox.CheckedChanged += (_, _) => RebindGrid();
-        _grid.SelectionChanged += (_, _) => ShowSelectedDetails();
-
-        Load += async (_, _) => await RefreshDashboardAsync();
-        FormClosed += (_, _) => _httpClient.Dispose();
-    }
-
-    private Control BuildToolbar()
-    {
-        var panel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            ColumnCount = 7,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink
-        };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-
-        var endpointLabel = new Label
-        {
-            AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            Text = "Management Base URL"
-        };
-
-        _baseUrlTextBox.Dock = DockStyle.Fill;
-        _baseUrlTextBox.Text = "http://127.0.0.1:8317";
-
-        _refreshButton.Text = "Refresh";
-        _refreshButton.AutoSize = true;
-
-        _reconcileButton.Text = "Reconcile Selected";
-        _reconcileButton.AutoSize = true;
-
-        _openManageButton.Text = "Open /manage";
-        _openManageButton.AutoSize = true;
-
-        _onlyCodexCheckBox.Text = "Only Codex";
-        _onlyCodexCheckBox.Checked = true;
-        _onlyCodexCheckBox.AutoSize = true;
-        _onlyCodexCheckBox.Anchor = AnchorStyles.Left;
-
-        panel.Controls.Add(endpointLabel, 0, 0);
-        panel.Controls.Add(_baseUrlTextBox, 1, 0);
-        panel.Controls.Add(_onlyCodexCheckBox, 2, 0);
-        panel.Controls.Add(_refreshButton, 3, 0);
-        panel.Controls.Add(_reconcileButton, 4, 0);
-        panel.Controls.Add(_openManageButton, 5, 0);
-        panel.Controls.Add(_statusLabel, 6, 0);
-
-        _statusLabel.AutoSize = true;
-        _statusLabel.Anchor = AnchorStyles.Left;
-        _statusLabel.ForeColor = Color.DimGray;
-        _statusLabel.Text = "Idle";
-
-        return panel;
-    }
-
-    private Control BuildSummaryPanel()
-    {
-        var panel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            AutoSize = true,
-            WrapContents = true,
-            Padding = new Padding(0, 10, 0, 8)
-        };
-
-        ConfigureSummaryLabel(_quotaSwitchProjectLabel, "Quota switch-project: --");
-        ConfigureSummaryLabel(_quotaSwitchPreviewLabel, "Quota switch-preview-model: --");
-        ConfigureSummaryLabel(_fingerprintLabel, "Codex fingerprint: --");
-
-        panel.Controls.Add(_quotaSwitchProjectLabel);
-        panel.Controls.Add(_quotaSwitchPreviewLabel);
-        panel.Controls.Add(_fingerprintLabel);
-        return panel;
-    }
-
-    private static void ConfigureSummaryLabel(Label label, string text)
-    {
-        label.AutoSize = true;
-        label.Margin = new Padding(0, 0, 18, 6);
-        label.Padding = new Padding(10, 8, 10, 8);
-        label.BackColor = Color.FromArgb(245, 247, 250);
-        label.Text = text;
-    }
-
-    private Control BuildGridPanel()
-    {
-        _grid.Dock = DockStyle.Fill;
-        _grid.AllowUserToAddRows = false;
-        _grid.AllowUserToDeleteRows = false;
-        _grid.AllowUserToResizeRows = false;
-        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _grid.MultiSelect = false;
-        _grid.ReadOnly = true;
-        _grid.RowHeadersVisible = false;
-        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        _grid.BackgroundColor = Color.White;
-
-        AddColumn("AuthIndex", "Auth Index", 110);
-        AddColumn("Label", "Label", 180);
-        AddColumn("Provider", "Provider", 90);
-        AddColumn("PlanType", "Plan", 80);
-        AddColumn("Status", "Status", 90);
-        AddColumn("Availability", "Availability", 110);
-        AddColumn("Account", "Account / Email", 210);
-        AddColumn("RetryAt", "Next Retry", 140);
-        AddColumn("Restrictions", "Restrictions", 280);
-
-        return _grid;
-    }
-
-    private Control BuildDetailsPanel()
-    {
-        var panel = new Panel
-        {
-            Dock = DockStyle.Fill,
+            RowCount = 9,
+            BackColor = Color.Transparent,
             Padding = new Padding(0, 10, 0, 0)
         };
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        stack.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        card.Controls.Add(stack);
+        stack.BringToFront();
 
-        var title = new Label
+        var dividerRow = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+        var dividerLineLeft = new Panel { Location = new Point(0, 21), Size = new Size(138, 1) };
+        var dividerLineRight = new Panel { Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(252, 21), Size = new Size(138, 1) };
+        var dividerLabel = new Label
         {
-            Dock = DockStyle.Top,
-            AutoSize = false,
-            Height = 26,
-            Text = "Selected auth JSON",
-            Font = new Font(Font, FontStyle.Bold)
+            AutoSize = true,
+            Location = new Point(147, 12),
+            Text = "Continue with key",
+            Font = DashboardStyles.CreateFont(8.25f, FontStyle.Regular)
+        };
+        dividerRow.Controls.Add(dividerLineLeft);
+        dividerRow.Controls.Add(dividerLineRight);
+        dividerRow.Controls.Add(dividerLabel);
+        dividerRow.Resize += (_, _) =>
+        {
+            dividerLineLeft.Width = Math.Max(60, dividerRow.Width / 2 - 112);
+            dividerLineRight.Width = dividerLineLeft.Width;
+            dividerLineRight.Left = dividerRow.Width - dividerLineRight.Width;
+            dividerLabel.Left = Math.Max(16, (dividerRow.Width - dividerLabel.Width) / 2);
+        };
+        stack.Controls.Add(dividerRow, 0, 0);
+
+        stack.Controls.Add(CreateFieldLabel("Connection"), 0, 2);
+        _baseUrlInputShell = CreateInputShell();
+        _baseUrlTextBox = CreateInputTextBox();
+        _baseUrlTextBox.TextChanged += (_, _) => UpdateManagementEndpointLabel();
+        _baseUrlTextBox.KeyDown += HandleLoginEnter;
+        _baseUrlInputShell.Controls.Add(_baseUrlTextBox);
+        stack.Controls.Add(_baseUrlInputShell, 0, 3);
+
+        _managementEndpointLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = DashboardStyles.CreateFont(8.25f, FontStyle.Regular)
+        };
+        stack.Controls.Add(_managementEndpointLabel, 0, 4);
+
+        stack.Controls.Add(CreateFieldLabel("Management key"), 0, 5);
+        _managementKeyInputShell = CreateInputShell();
+        _managementKeyTextBox = CreateInputTextBox();
+        _managementKeyTextBox.UseSystemPasswordChar = true;
+        _managementKeyTextBox.KeyDown += HandleLoginEnter;
+        _showManagementKeyButton = new Button
+        {
+            Dock = DockStyle.Right,
+            Width = 72,
+            Text = "Show"
+        };
+        _showManagementKeyButton.Click += (_, _) => ToggleManagementKeyVisibility();
+        _managementKeyInputShell.Controls.Add(_showManagementKeyButton);
+        _managementKeyInputShell.Controls.Add(_managementKeyTextBox);
+        _managementKeyTextBox.Dock = DockStyle.Fill;
+        stack.Controls.Add(_managementKeyInputShell, 0, 6);
+
+        var rememberRow = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent
+        };
+        _rememberKeyCheckBox = new CheckBox
+        {
+            AutoSize = true,
+            Location = new Point(0, 11),
+            Text = "Remember management key"
+        };
+        rememberRow.Controls.Add(_rememberKeyCheckBox);
+        stack.Controls.Add(rememberRow, 0, 7);
+
+        var actionHost = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Color.Transparent,
+            Padding = new Padding(0, 12, 0, 0)
+        };
+        actionHost.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        actionHost.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));
+        actionHost.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        stack.Controls.Add(actionHost, 0, 8);
+
+        _signInButton = new Button
+        {
+            Dock = DockStyle.Fill,
+            Height = 46,
+            Text = "Sign in"
+        };
+        _signInButton.Click += async (_, _) => await SignInAsync();
+        actionHost.Controls.Add(_signInButton, 0, 0);
+
+        _loginStatusLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.TopLeft,
+            Font = DashboardStyles.CreateFont(8.75f, FontStyle.Regular)
+        };
+        actionHost.Controls.Add(_loginStatusLabel, 0, 2);
+
+        return host;
+    }
+
+    private AmbientBackgroundPanel BuildAppScene()
+    {
+        var scene = new AmbientBackgroundPanel
+        {
+            Dock = DockStyle.Fill,
+            Scene = BackgroundScene.App,
+            ThemeMode = _themeMode,
+            Visible = false
         };
 
-        _detailsTextBox.Dock = DockStyle.Fill;
-        _detailsTextBox.Multiline = true;
-        _detailsTextBox.ScrollBars = ScrollBars.Both;
-        _detailsTextBox.Font = new Font("Consolas", 10);
-        _detailsTextBox.ReadOnly = true;
+        var frame = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(18),
+            BackColor = Color.Transparent
+        };
+        scene.Controls.Add(frame);
 
-        panel.Controls.Add(_detailsTextBox);
-        panel.Controls.Add(title);
-        return panel;
+        _sidebarHost = new Panel
+        {
+            Dock = DockStyle.Left,
+            Width = _sidebarCollapsed ? 104 : 240,
+            Padding = new Padding(0, 0, 16, 0),
+            BackColor = Color.Transparent
+        };
+        frame.Controls.Add(_sidebarHost);
+
+        _sidebarSurface = new RoundedSurfacePanel
+        {
+            Dock = DockStyle.Fill,
+            CornerRadius = 28,
+            BorderWidth = 1,
+            Padding = new Padding(14, 18, 14, 16)
+        };
+        _sidebarHost.Controls.Add(_sidebarSurface);
+
+        var brandPanel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 82,
+            BackColor = Color.Transparent
+        };
+        _sidebarSurface.Controls.Add(brandPanel);
+
+        var brandBadge = new RoundedSurfacePanel
+        {
+            Size = new Size(42, 42),
+            Location = new Point(2, 4),
+            CornerRadius = 16,
+            BorderWidth = 0
+        };
+        var brandBadgeText = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "CP",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = DashboardStyles.CreateFont(10.5f, FontStyle.Bold)
+        };
+        brandBadge.Controls.Add(brandBadgeText);
+        brandPanel.Controls.Add(brandBadge);
+
+        _sidebarBrandTitleLabel = new Label
+        {
+            AutoSize = true,
+            Location = new Point(56, 7),
+            Text = "Console",
+            Font = DashboardStyles.CreateFont(14f, FontStyle.Bold)
+        };
+        brandPanel.Controls.Add(_sidebarBrandTitleLabel);
+
+        _sidebarBrandSubtitleLabel = new Label
+        {
+            AutoSize = true,
+            Location = new Point(56, 34),
+            Text = "CLI Proxy",
+            Font = DashboardStyles.CreateFont(8.5f, FontStyle.Regular)
+        };
+        brandPanel.Controls.Add(_sidebarBrandSubtitleLabel);
+
+        var footerCard = new RoundedSurfacePanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 88,
+            CornerRadius = 18,
+            BorderWidth = 1,
+            Padding = new Padding(14, 10, 14, 10)
+        };
+        _sidebarSurface.Controls.Add(footerCard);
+
+        _sidebarFooterTitleLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 26,
+            Text = "Admin",
+            Font = DashboardStyles.CreateFont(10.25f, FontStyle.Bold)
+        };
+        footerCard.Controls.Add(_sidebarFooterTitleLabel);
+
+        _sidebarFooterSubtitleLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 18,
+            Text = "Management session",
+            Font = DashboardStyles.CreateFont(8.5f, FontStyle.Regular)
+        };
+        footerCard.Controls.Add(_sidebarFooterSubtitleLabel);
+        _sidebarFooterSubtitleLabel.BringToFront();
+
+        _sidebarNavLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            AutoScroll = true,
+            Padding = new Padding(0, 14, 0, 14),
+            BackColor = Color.Transparent
+        };
+        _sidebarNavLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        _sidebarSurface.Controls.Add(_sidebarNavLayout);
+
+        AddNavigationButton("overview", "Dashboard", "DB");
+        AddNavigationButton("auth-files", "Auth Files", "AU");
+        AddNavigationButton("models", "Models", "MD");
+        AddNavigationButton("logs", "Logs", "LG");
+
+        var mainArea = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent
+        };
+        frame.Controls.Add(mainArea);
+
+        _headerSurface = new RoundedSurfacePanel
+        {
+            Dock = DockStyle.Top,
+            Height = 88,
+            CornerRadius = 28,
+            BorderWidth = 1,
+            Padding = new Padding(20, 16, 20, 12)
+        };
+        mainArea.Controls.Add(_headerSurface);
+
+        var headerLeft = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent
+        };
+        _headerSurface.Controls.Add(headerLeft);
+
+        var headerRight = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right,
+            Width = 330,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(0, 8, 0, 0),
+            BackColor = Color.Transparent
+        };
+        _headerSurface.Controls.Add(headerRight);
+
+        _sidebarToggleButton = new Button
+        {
+            Size = new Size(52, 38),
+            Text = string.Empty,
+            Margin = new Padding(0, 0, 10, 0)
+        };
+        _sidebarToggleButton.Click += (_, _) => ToggleSidebar();
+        headerRight.Controls.Add(_sidebarToggleButton);
+
+        _refreshButton = new Button
+        {
+            Size = new Size(82, 38),
+            Text = "Refresh",
+            Margin = new Padding(0, 0, 10, 0)
+        };
+        _refreshButton.Click += async (_, _) => await RefreshCurrentPageAsync();
+        headerRight.Controls.Add(_refreshButton);
+
+        _shellThemeButton = new Button
+        {
+            Size = new Size(78, 38),
+            Text = string.Empty,
+            Margin = new Padding(0, 0, 10, 0)
+        };
+        _shellThemeButton.Click += (_, _) => ToggleTheme();
+        headerRight.Controls.Add(_shellThemeButton);
+
+        _logoutButton = new Button
+        {
+            Size = new Size(86, 38),
+            Text = "Logout",
+            Margin = new Padding(0, 0, 0, 0)
+        };
+        _logoutButton.Click += (_, _) => Logout();
+        headerRight.Controls.Add(_logoutButton);
+
+        _shellTitleLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 28,
+            Text = "Dashboard",
+            Font = DashboardStyles.CreateFont(15.5f, FontStyle.Bold)
+        };
+        headerLeft.Controls.Add(_shellTitleLabel);
+
+        _shellSubtitleLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 24,
+            Text = "-",
+            Font = DashboardStyles.CreateFont(9.25f, FontStyle.Regular)
+        };
+        headerLeft.Controls.Add(_shellSubtitleLabel);
+
+        _statusLabel = new Label
+        {
+            Dock = DockStyle.Bottom,
+            Height = 22,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = DashboardStyles.CreateFont(8.5f, FontStyle.Regular)
+        };
+        headerLeft.Controls.Add(_statusLabel);
+        _statusLabel.BringToFront();
+
+        var contentPadding = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(0, 16, 0, 0),
+            BackColor = Color.Transparent
+        };
+        mainArea.Controls.Add(contentPadding);
+
+        _contentHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent
+        };
+        contentPadding.Controls.Add(_contentHost);
+
+        return scene;
     }
 
-    private void AddColumn(string name, string headerText, int minimumWidth)
+    private void AddNavigationButton(string key, string title, string shortText)
     {
-        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        var row = _sidebarNavLayout.RowCount++;
+        _sidebarNavLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+
+        var button = new Button
         {
-            Name = name,
-            HeaderText = headerText,
-            MinimumWidth = minimumWidth
-        });
+            Dock = DockStyle.Fill,
+            Height = 44,
+            FlatStyle = FlatStyle.Flat,
+            FlatAppearance = { BorderSize = 0 },
+            Tag = new NavItemMeta(key, title, shortText),
+            Text = title,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(18, 0, 18, 0),
+            Margin = new Padding(0, 0, 0, 10)
+        };
+        button.Click += async (_, _) => await SwitchToPageAsync(key);
+
+        _navButtons[key] = button;
+        _sidebarNavLayout.Controls.Add(button, 0, row);
     }
 
-    private async Task RefreshDashboardAsync()
+    private RoundedSurfacePanel CreateInputShell()
     {
-        SetBusy(true, "Refreshing...");
-        try
+        return new RoundedSurfacePanel
         {
-            var baseUrl = NormalizeBaseUrl(_baseUrlTextBox.Text);
-            var authTask = GetJsonAsync<AuthFilesResponse>($"{baseUrl}/v0/management/auth-files");
-            var switchProjectTask = GetJsonAsync<BoolPayload>($"{baseUrl}/v0/management/quota-exceeded/switch-project");
-            var switchPreviewTask = GetJsonAsync<BoolPayload>($"{baseUrl}/v0/management/quota-exceeded/switch-preview-model");
-            var fingerprintTask = GetJsonAsync<IdentityFingerprintResponse>($"{baseUrl}/v0/management/identity-fingerprint");
-
-            await Task.WhenAll(authTask, switchProjectTask, switchPreviewTask, fingerprintTask);
-
-            var authPayload = await authTask;
-            var switchProject = await switchProjectTask;
-            var switchPreview = await switchPreviewTask;
-            var fingerprint = await fingerprintTask;
-
-            _allEntries = (authPayload?.Files ?? new List<AuthFileEntry>())
-                .OrderByDescending(entry => IsCodex(entry))
-                .ThenBy(entry => entry.Label ?? entry.Name ?? entry.AuthIndex ?? string.Empty, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-
-            _quotaSwitchProjectLabel.Text = $"Quota switch-project: {switchProject?.GetFirstBoolean() switch { true => "on", false => "off", null => "--" }}";
-            _quotaSwitchPreviewLabel.Text = $"Quota switch-preview-model: {switchPreview?.GetFirstBoolean() switch { true => "on", false => "off", null => "--" }}";
-            _fingerprintLabel.Text = $"Codex fingerprint: {BuildFingerprintSummary(fingerprint?.IdentityFingerprint?.Codex)}";
-
-            RebindGrid();
-            SetBusy(false, $"Loaded {_allEntries.Count} auth entries");
-        }
-        catch (Exception ex)
-        {
-            SetBusy(false, "Refresh failed");
-            MessageBox.Show(this, ex.Message, "CliRelay Codex Switch Dashboard", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+            Dock = DockStyle.Fill,
+            CornerRadius = 22,
+            BorderWidth = 1,
+            Padding = new Padding(18, 14, 14, 10)
+        };
     }
 
-    private async Task ReconcileSelectedAsync()
+    private TextBox CreateInputTextBox()
     {
-        var selected = GetSelectedEntry();
-        if (selected is null || string.IsNullOrWhiteSpace(selected.AuthIndex))
+        return new TextBox
         {
-            MessageBox.Show(this, "Please select an auth row with a valid auth_index first.", "CliRelay Codex Switch Dashboard", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Dock = DockStyle.Fill,
+            Multiline = false,
+            Margin = Padding.Empty
+        };
+    }
+
+    private static Label CreateFieldLabel(string text)
+    {
+        return new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = text,
+            TextAlign = ContentAlignment.BottomLeft,
+            Font = DashboardStyles.CreateFont(8.75f, FontStyle.Bold)
+        };
+    }
+
+    private void LoadPreferencesIntoLogin()
+    {
+        _baseUrlTextBox.Text = _preferences.BaseUrl;
+        _managementKeyTextBox.Text = _preferences.RememberManagementKey ? _preferences.ManagementKey : string.Empty;
+        _rememberKeyCheckBox.Checked = _preferences.RememberManagementKey;
+        UpdateManagementEndpointLabel();
+    }
+
+    private void UpdateManagementEndpointLabel()
+    {
+        var normalized = NormalizeBaseUrl(_baseUrlTextBox.Text, allowEmpty: true);
+        _managementEndpointLabel.Text = string.IsNullOrWhiteSpace(normalized)
+            ? "Management endpoint: -"
+            : $"Management endpoint: {normalized}/v0/management";
+    }
+
+    private async Task SignInAsync()
+    {
+        if (_signingIn)
+        {
             return;
         }
 
-        SetBusy(true, $"Reconciling {selected.AuthIndex}...");
-        try
+        var baseUrl = NormalizeBaseUrl(_baseUrlTextBox.Text, allowEmpty: false);
+        if (string.IsNullOrWhiteSpace(baseUrl))
         {
-            var baseUrl = NormalizeBaseUrl(_baseUrlTextBox.Text);
-            var payload = JsonSerializer.Serialize(new { auth_index = selected.AuthIndex });
-            using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-            using var response = await _httpClient.PostAsync($"{baseUrl}/v0/management/quota/reconcile", content);
-            var responseText = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new InvalidOperationException($"quota reconcile failed: {(int)response.StatusCode} {response.ReasonPhrase}\n{responseText}");
-            }
-
-            await RefreshDashboardAsync();
-            SetBusy(false, $"Reconciled {selected.AuthIndex}");
-        }
-        catch (Exception ex)
-        {
-            SetBusy(false, "Reconcile failed");
-            MessageBox.Show(this, ex.Message, "CliRelay Codex Switch Dashboard", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private async Task<T?> GetJsonAsync<T>(string url)
-    {
-        using var response = await _httpClient.GetAsync(url);
-        var content = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new InvalidOperationException($"{url}\n{(int)response.StatusCode} {response.ReasonPhrase}\n{content}");
-        }
-
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            return default;
-        }
-        return JsonSerializer.Deserialize<T>(content, JsonOptions);
-    }
-
-    private void RebindGrid()
-    {
-        var currentSelection = GetSelectedEntry()?.Id;
-        _grid.Rows.Clear();
-
-        IEnumerable<AuthFileEntry> entries = _allEntries;
-        if (_onlyCodexCheckBox.Checked)
-        {
-            entries = entries.Where(IsCodex);
-        }
-
-        foreach (var entry in entries)
-        {
-            var rowIndex = _grid.Rows.Add(
-                entry.AuthIndex ?? string.Empty,
-                entry.Label ?? entry.Name ?? string.Empty,
-                entry.Provider ?? entry.Type ?? string.Empty,
-                entry.PlanType ?? string.Empty,
-                entry.Status ?? string.Empty,
-                BuildAvailability(entry),
-                BuildAccount(entry),
-                FormatInstant(entry.NextRetryAfter ?? entry.Modtime),
-                BuildRestrictionSummary(entry.Restrictions)
-            );
-            _grid.Rows[rowIndex].Tag = entry;
-            if (string.Equals(entry.Id, currentSelection, StringComparison.OrdinalIgnoreCase))
-            {
-                _grid.Rows[rowIndex].Selected = true;
-            }
-        }
-
-        if (_grid.Rows.Count > 0 && _grid.SelectedRows.Count == 0)
-        {
-            _grid.Rows[0].Selected = true;
-        }
-        ShowSelectedDetails();
-    }
-
-    private void ShowSelectedDetails()
-    {
-        var selected = GetSelectedEntry();
-        if (selected is null)
-        {
-            _detailsTextBox.Text = string.Empty;
-            _reconcileButton.Enabled = false;
+            SetLoginStatus("A valid base URL is required.", isError: true);
             return;
         }
 
-        _reconcileButton.Enabled = !string.IsNullOrWhiteSpace(selected.AuthIndex);
-        _detailsTextBox.Text = JsonSerializer.Serialize(selected, JsonOptions);
-    }
-
-    private AuthFileEntry? GetSelectedEntry()
-    {
-        if (_grid.SelectedRows.Count == 0)
+        var managementKey = _managementKeyTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(managementKey))
         {
-            return null;
+            SetLoginStatus("Management key is required.", isError: true);
+            return;
         }
-        return _grid.SelectedRows[0].Tag as AuthFileEntry;
-    }
 
-    private void OpenManagePage()
-    {
+        _signingIn = true;
+        ToggleLoginControls(false);
+        SetLoginStatus("Connecting to management endpoint...", isError: false);
+
         try
         {
-            var target = NormalizeBaseUrl(_baseUrlTextBox.Text) + "/manage";
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = target,
-                UseShellExecute = true
-            });
+            _client.BaseUrl = baseUrl;
+            _client.ManagementKey = managementKey;
+
+            _ = await _client.GetDashboardSummaryAsync();
+
+            _preferences.BaseUrl = baseUrl;
+            _preferences.RememberManagementKey = _rememberKeyCheckBox.Checked;
+            _preferences.ManagementKey = _rememberKeyCheckBox.Checked ? managementKey : string.Empty;
+            _preferences.ThemeMode = _themeMode;
+            _preferences.SidebarCollapsed = _sidebarCollapsed;
+            PersistPreferences();
+
+            EnsurePagesCreated();
+            ShowShellScene();
+            await SwitchToPageAsync(_currentPageKey, forceRefresh: true);
+            SetStatus("Connected. Dashboard synchronized.", isError: false);
+            SetLoginStatus(string.Empty, isError: false);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "CliRelay Codex Switch Dashboard", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            SetLoginStatus(ex.Message, isError: true);
         }
-    }
-
-    private void SetBusy(bool busy, string status)
-    {
-        _refreshButton.Enabled = !busy;
-        _reconcileButton.Enabled = !busy && GetSelectedEntry() is not null;
-        _openManageButton.Enabled = !busy;
-        _baseUrlTextBox.Enabled = !busy;
-        _onlyCodexCheckBox.Enabled = !busy;
-        _statusLabel.Text = status;
-    }
-
-    private static string NormalizeBaseUrl(string raw)
-    {
-        var trimmed = (raw ?? string.Empty).Trim().TrimEnd('/');
-        if (string.IsNullOrWhiteSpace(trimmed))
+        finally
         {
-            throw new InvalidOperationException("Management base URL is required.");
+            _signingIn = false;
+            ToggleLoginControls(true);
         }
-        return trimmed;
     }
 
-    private static bool IsCodex(AuthFileEntry entry)
+    private void ToggleLoginControls(bool enabled)
     {
-        var provider = entry.Provider ?? entry.Type ?? string.Empty;
-        return provider.Equals("codex", StringComparison.OrdinalIgnoreCase);
+        _baseUrlTextBox.Enabled = enabled;
+        _managementKeyTextBox.Enabled = enabled;
+        _rememberKeyCheckBox.Enabled = enabled;
+        _showManagementKeyButton.Enabled = enabled;
+        _signInButton.Enabled = enabled;
+        _signInButton.Text = enabled ? "Sign in" : "Signing in...";
     }
 
-    private static string BuildAccount(AuthFileEntry entry)
+    private void ToggleManagementKeyVisibility()
     {
-        var account = FirstNonEmpty(entry.Label, entry.Email, entry.Account, entry.Name, entry.Id);
-        var accountType = entry.AccountType?.Trim();
-        if (string.IsNullOrWhiteSpace(accountType))
-        {
-            return account;
-        }
-        return $"{account} ({accountType})";
+        _showManagementKey = !_showManagementKey;
+        _managementKeyTextBox.UseSystemPasswordChar = !_showManagementKey;
+        _showManagementKeyButton.Text = _showManagementKey ? "Hide" : "Show";
     }
 
-    private static string BuildAvailability(AuthFileEntry entry)
+    private async Task SwitchToPageAsync(string key, bool forceRefresh = false)
     {
-        if (entry.Disabled)
+        if (!_pages.TryGetValue(key, out var targetPage))
         {
-            return "disabled";
+            return;
         }
-        if (entry.Unavailable)
+
+        _currentPageKey = key;
+        foreach (var page in _pages.Values)
         {
-            return "unavailable";
+            page.Visible = false;
         }
-        if (string.Equals(entry.Status, "active", StringComparison.OrdinalIgnoreCase))
+
+        targetPage.Visible = true;
+        targetPage.BringToFront();
+        UpdateNavigationState();
+        UpdateShellHeader();
+
+        if (forceRefresh || string.Equals(key, _currentPageKey, StringComparison.OrdinalIgnoreCase))
         {
-            return "active";
+            await RefreshCurrentPageAsync();
         }
-        return entry.Status ?? "--";
     }
 
-    private static string BuildFingerprintSummary(CodexIdentityFingerprintPayload? fingerprint)
+    private async Task RefreshCurrentPageAsync()
     {
-        if (fingerprint is null)
+        if (!_pages.TryGetValue(_currentPageKey, out var page))
         {
-            return "--";
+            return;
         }
 
-        var enabled = fingerprint.Enabled ? "on" : "off";
-        var sessionMode = string.IsNullOrWhiteSpace(fingerprint.SessionMode) ? "--" : fingerprint.SessionMode.Trim();
-        var userAgent = string.IsNullOrWhiteSpace(fingerprint.UserAgent) ? "--" : fingerprint.UserAgent.Trim();
-        return $"{enabled} | session-mode={sessionMode} | ua={userAgent}";
+        _refreshButton.Enabled = false;
+        try
+        {
+            SetStatus($"Refreshing {page.PageTitle.ToLowerInvariant()}...", isError: false);
+            await page.RefreshAsync();
+            SetStatus($"{page.PageTitle} updated.", isError: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, isError: true);
+        }
+        finally
+        {
+            _refreshButton.Enabled = true;
+        }
     }
 
-    private static string BuildRestrictionSummary(JsonElement restrictions)
+    private void EnsurePagesCreated()
     {
-        if (restrictions.ValueKind != JsonValueKind.Array)
+        if (_pages.Count > 0)
+        {
+            return;
+        }
+
+        var pages = new ManagementPageBase[]
+        {
+            new OverviewPage(_client, SetStatus),
+            new AuthFilesPage(_client, SetStatus),
+            new ModelsPage(_client, SetStatus),
+            new LogsPage(_client, SetStatus)
+        };
+
+        foreach (var page in pages)
+        {
+            page.Visible = false;
+            page.SetTheme(_themeMode);
+            _pages[page.PageKey] = page;
+            _contentHost.Controls.Add(page);
+        }
+    }
+
+    private void ToggleSidebar()
+    {
+        _sidebarCollapsed = !_sidebarCollapsed;
+        _preferences.SidebarCollapsed = _sidebarCollapsed;
+        PersistPreferences();
+        ApplySidebarState();
+    }
+
+    private void ApplySidebarState()
+    {
+        _sidebarHost.Width = _sidebarCollapsed ? 104 : 240;
+        _sidebarBrandTitleLabel.Text = _sidebarCollapsed ? "CP" : "Console";
+        _sidebarBrandSubtitleLabel.Visible = !_sidebarCollapsed;
+        _sidebarFooterTitleLabel.Text = _sidebarCollapsed ? "A" : "Admin";
+        _sidebarFooterSubtitleLabel.Visible = !_sidebarCollapsed;
+        _sidebarToggleButton.Text = _sidebarCollapsed ? ">>" : "<<";
+
+        foreach (var pair in _navButtons)
+        {
+            if (pair.Value.Tag is not NavItemMeta meta)
+            {
+                continue;
+            }
+
+            pair.Value.Text = _sidebarCollapsed ? meta.ShortText : meta.Title;
+            pair.Value.TextAlign = _sidebarCollapsed ? ContentAlignment.MiddleCenter : ContentAlignment.MiddleLeft;
+            pair.Value.Padding = _sidebarCollapsed ? new Padding(0) : new Padding(18, 0, 18, 0);
+        }
+    }
+
+    private void UpdateShellHeader()
+    {
+        if (_pages.TryGetValue(_currentPageKey, out var page))
+        {
+            _shellTitleLabel.Text = page.PageTitle;
+        }
+        else
+        {
+            _shellTitleLabel.Text = "Console";
+        }
+
+        _shellSubtitleLabel.Text = $"Connected to {_client.BaseUrl}";
+    }
+
+    private void UpdateNavigationState()
+    {
+        var palette = DashboardStyles.GetPalette(_themeMode);
+        foreach (var pair in _navButtons)
+        {
+            var button = pair.Value;
+            var active = string.Equals(pair.Key, _currentPageKey, StringComparison.OrdinalIgnoreCase);
+            button.BackColor = active ? palette.Accent : Color.Transparent;
+            button.ForeColor = active ? palette.AccentText : palette.TextSecondary;
+            button.Font = DashboardStyles.CreateFont(9.5f, active ? FontStyle.Bold : FontStyle.Regular);
+        }
+    }
+
+    private void ToggleTheme()
+    {
+        _themeMode = _themeMode == DashboardThemeMode.Light ? DashboardThemeMode.Dark : DashboardThemeMode.Light;
+        _preferences.ThemeMode = _themeMode;
+        PersistPreferences();
+        ApplyTheme();
+    }
+
+    private void ApplyTheme()
+    {
+        var palette = DashboardStyles.GetPalette(_themeMode);
+        BackColor = palette.WindowBackground;
+        ForeColor = palette.TextPrimary;
+
+        _loginScene.ThemeMode = _themeMode;
+        _appScene.ThemeMode = _themeMode;
+
+        ApplyLoginTheme(palette);
+        ApplyShellTheme(palette);
+
+        foreach (var page in _pages.Values)
+        {
+            page.SetTheme(_themeMode);
+        }
+    }
+
+    private void ApplyLoginTheme(ThemePalette palette)
+    {
+        _loginThemeButton.Text = _themeMode == DashboardThemeMode.Light ? "Dark Mode" : "Light Mode";
+        DashboardStyles.StyleSecondaryButton(_loginThemeButton, palette);
+
+        DashboardStyles.ApplyCardStyle(_baseUrlInputShell, palette);
+        DashboardStyles.ApplyCardStyle(_managementKeyInputShell, palette);
+        DashboardStyles.StyleTextBox(_baseUrlTextBox, palette);
+        DashboardStyles.StyleTextBox(_managementKeyTextBox, palette);
+
+        DashboardStyles.StyleGhostButton(_showManagementKeyButton, palette);
+        DashboardStyles.StylePrimaryButton(_signInButton, palette);
+        DashboardStyles.StyleCheckBox(_rememberKeyCheckBox, palette);
+
+        _brandNameLabel.ForeColor = palette.TextPrimary;
+        _heroTitleLabel.ForeColor = palette.TextPrimary;
+        _heroDescriptionLabel.ForeColor = palette.TextSecondary;
+        _managementEndpointLabel.ForeColor = palette.TextTertiary;
+        _loginStatusLabel.ForeColor = palette.TextSecondary;
+
+        foreach (var label in _loginScene.Controls.OfType<Control>().SelectMany(EnumerateLabels))
+        {
+            if (label.Text is "Connection" or "Management key" or "Continue with key" or "PROVIDER COVERAGE" or "Sign in")
+            {
+                label.ForeColor = label.Text == "Sign in" ? palette.TextPrimary : palette.TextSecondary;
+            }
+        }
+
+        foreach (var pill in _loginScene.Controls.OfType<Control>().SelectMany(EnumerateLabels))
+        {
+            if (pill.Text is "OpenAI" or "Gemini" or "Claude" or "Vertex")
+            {
+                pill.BackColor = palette.Surface;
+                pill.ForeColor = palette.TextPrimary;
+            }
+        }
+
+        foreach (var panel in _loginScene.Controls.OfType<Control>().SelectMany(EnumeratePanels))
+        {
+            if (panel.Height == 1)
+            {
+                panel.BackColor = palette.Border;
+            }
+        }
+    }
+
+    private void ApplyShellTheme(ThemePalette palette)
+    {
+        DashboardStyles.ApplyCardStyle(_sidebarSurface, palette);
+        _sidebarSurface.SurfaceColor = palette.SidebarBackground;
+        _sidebarSurface.BorderColor = palette.SidebarBorder;
+        DashboardStyles.ApplyCardStyle(_headerSurface, palette);
+        DashboardStyles.ApplyCardStyle((RoundedSurfacePanel)_sidebarSurface.Controls.OfType<RoundedSurfacePanel>().First(), palette);
+
+        _sidebarBrandTitleLabel.ForeColor = palette.TextPrimary;
+        _sidebarBrandSubtitleLabel.ForeColor = palette.TextTertiary;
+        _sidebarFooterTitleLabel.ForeColor = palette.TextPrimary;
+        _sidebarFooterSubtitleLabel.ForeColor = palette.TextTertiary;
+        _shellTitleLabel.ForeColor = palette.TextPrimary;
+        _shellSubtitleLabel.ForeColor = palette.TextSecondary;
+
+        _statusLabel.ForeColor = palette.TextTertiary;
+
+        DashboardStyles.StyleSecondaryButton(_sidebarToggleButton, palette);
+        DashboardStyles.StyleSecondaryButton(_refreshButton, palette);
+        DashboardStyles.StyleSecondaryButton(_shellThemeButton, palette);
+        DashboardStyles.StyleSecondaryButton(_logoutButton, palette);
+
+        _shellThemeButton.Text = _themeMode == DashboardThemeMode.Light ? "Dark" : "Light";
+        _logoutButton.ForeColor = palette.Danger;
+
+        ApplySidebarState();
+        UpdateNavigationState();
+    }
+
+    private void SetLoginStatus(string message, bool isError)
+    {
+        var palette = DashboardStyles.GetPalette(_themeMode);
+        _loginStatusLabel.Text = message;
+        _loginStatusLabel.ForeColor = isError ? palette.Danger : palette.TextSecondary;
+    }
+
+    private void SetStatus(string message, bool isError)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => SetStatus(message, isError));
+            return;
+        }
+
+        var palette = DashboardStyles.GetPalette(_themeMode);
+        _statusLabel.Text = message;
+        _statusLabel.ForeColor = isError ? palette.Danger : palette.TextTertiary;
+    }
+
+    private void Logout()
+    {
+        _client.ManagementKey = string.Empty;
+        ShowLoginScene();
+        SetLoginStatus("Session closed.", isError: false);
+        _managementKeyTextBox.Text = _preferences.RememberManagementKey ? _preferences.ManagementKey : string.Empty;
+    }
+
+    private void ShowLoginScene()
+    {
+        _appScene.Visible = false;
+        _loginScene.Visible = true;
+        _loginScene.BringToFront();
+    }
+
+    private void ShowShellScene()
+    {
+        _loginScene.Visible = false;
+        _appScene.Visible = true;
+        _appScene.BringToFront();
+        UpdateShellHeader();
+    }
+
+    private void PersistPreferences()
+    {
+        _preferences.ThemeMode = _themeMode;
+        _preferences.SidebarCollapsed = _sidebarCollapsed;
+        _preferencesStore.Save(_preferences);
+    }
+
+    private void HandleLoginEnter(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Enter)
+        {
+            e.SuppressKeyPress = true;
+            _ = SignInAsync();
+        }
+    }
+
+    private static string NormalizeBaseUrl(string value, bool allowEmpty)
+    {
+        value = (value ?? string.Empty).Trim().TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return allowEmpty ? string.Empty : string.Empty;
+        }
+
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
         {
             return string.Empty;
         }
 
-        var parts = new List<string>();
-        foreach (var item in restrictions.EnumerateArray())
-        {
-            var scope = item.TryGetProperty("scope", out var scopeNode) ? scopeNode.GetString() : null;
-            var model = item.TryGetProperty("model", out var modelNode) ? modelNode.GetString() : null;
-            var reason = item.TryGetProperty("reason", out var reasonNode) ? reasonNode.GetString() : null;
-            var status = item.TryGetProperty("status", out var statusNode) ? statusNode.GetString() : null;
+        return uri.ToString().TrimEnd('/');
+    }
 
-            var left = string.IsNullOrWhiteSpace(model) ? scope : $"{scope}:{model}";
-            var right = FirstNonEmpty(reason, status, "restricted");
-            if (!string.IsNullOrWhiteSpace(left))
+    private static IEnumerable<Label> EnumerateLabels(Control root)
+    {
+        foreach (Control child in root.Controls)
+        {
+            if (child is Label label)
             {
-                parts.Add($"{left}={right}");
+                yield return label;
+            }
+
+            foreach (var nested in EnumerateLabels(child))
+            {
+                yield return nested;
             }
         }
-
-        return string.Join("; ", parts);
     }
 
-    private static string FormatInstant(DateTimeOffset? value)
+    private static IEnumerable<Panel> EnumeratePanels(Control root)
     {
-        return value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? string.Empty;
-    }
-
-    private static string FirstNonEmpty(params string?[] values)
-    {
-        foreach (var value in values)
+        foreach (Control child in root.Controls)
         {
-            if (!string.IsNullOrWhiteSpace(value))
+            if (child is Panel panel)
             {
-                return value.Trim();
+                yield return panel;
+            }
+
+            foreach (var nested in EnumeratePanels(child))
+            {
+                yield return nested;
             }
         }
-        return string.Empty;
     }
 
-    private sealed class AuthFilesResponse
-    {
-        [JsonPropertyName("files")]
-        public List<AuthFileEntry> Files { get; set; } = new();
-    }
-
-    private sealed class AuthFileEntry
-    {
-        [JsonPropertyName("id")]
-        public string? Id { get; set; }
-
-        [JsonPropertyName("auth_index")]
-        public string? AuthIndex { get; set; }
-
-        [JsonPropertyName("name")]
-        public string? Name { get; set; }
-
-        [JsonPropertyName("type")]
-        public string? Type { get; set; }
-
-        [JsonPropertyName("provider")]
-        public string? Provider { get; set; }
-
-        [JsonPropertyName("label")]
-        public string? Label { get; set; }
-
-        [JsonPropertyName("email")]
-        public string? Email { get; set; }
-
-        [JsonPropertyName("account_type")]
-        public string? AccountType { get; set; }
-
-        [JsonPropertyName("account")]
-        public string? Account { get; set; }
-
-        [JsonPropertyName("status")]
-        public string? Status { get; set; }
-
-        [JsonPropertyName("status_message")]
-        public string? StatusMessage { get; set; }
-
-        [JsonPropertyName("plan_type")]
-        public string? PlanType { get; set; }
-
-        [JsonPropertyName("disabled")]
-        public bool Disabled { get; set; }
-
-        [JsonPropertyName("unavailable")]
-        public bool Unavailable { get; set; }
-
-        [JsonPropertyName("runtime_only")]
-        public bool RuntimeOnly { get; set; }
-
-        [JsonPropertyName("created_at")]
-        public DateTimeOffset? CreatedAt { get; set; }
-
-        [JsonPropertyName("updated_at")]
-        public DateTimeOffset? UpdatedAt { get; set; }
-
-        [JsonPropertyName("modtime")]
-        public DateTimeOffset? Modtime { get; set; }
-
-        [JsonPropertyName("last_refresh")]
-        public DateTimeOffset? LastRefresh { get; set; }
-
-        [JsonPropertyName("next_retry_after")]
-        public DateTimeOffset? NextRetryAfter { get; set; }
-
-        [JsonPropertyName("restrictions")]
-        public JsonElement Restrictions { get; set; }
-    }
-
-    private sealed class BoolPayload
-    {
-        [JsonExtensionData]
-        public Dictionary<string, JsonElement> Data { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-
-        public bool? GetFirstBoolean()
-        {
-            foreach (var value in Data.Values)
-            {
-                if (value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False)
-                {
-                    return value.GetBoolean();
-                }
-            }
-            return null;
-        }
-    }
-
-    private sealed class IdentityFingerprintResponse
-    {
-        [JsonPropertyName("identity-fingerprint")]
-        public IdentityFingerprintPayload? IdentityFingerprint { get; set; }
-    }
-
-    private sealed class IdentityFingerprintPayload
-    {
-        [JsonPropertyName("codex")]
-        public CodexIdentityFingerprintPayload? Codex { get; set; }
-    }
-
-    private sealed class CodexIdentityFingerprintPayload
-    {
-        [JsonPropertyName("enabled")]
-        public bool Enabled { get; set; }
-
-        [JsonPropertyName("user-agent")]
-        public string? UserAgent { get; set; }
-
-        [JsonPropertyName("session-mode")]
-        public string? SessionMode { get; set; }
-    }
+    private sealed record NavItemMeta(string Key, string Title, string ShortText);
 }

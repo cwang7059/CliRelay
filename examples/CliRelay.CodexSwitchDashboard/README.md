@@ -1,14 +1,17 @@
-# CliRelay Codex Switch Dashboard
+# CliRelay Management Dashboard (C#)
 
-Standalone Windows Forms companion for CliRelay's management API.
+Standalone Windows Forms management frontend for CliRelay's management API.
 
 What it does:
 
+- Connects to any CliRelay management endpoint with `base URL + management key`
+- Shows dashboard KPI cards, system stats, Codex fingerprint summary, and runtime toggle state
 - Lists auth entries from `GET /v0/management/auth-files`
-- Highlights Codex auth rows, plan type, availability, and active restrictions
-- Shows current `quota-exceeded` toggles
-- Shows the current Codex identity fingerprint summary
-- Lets you trigger `POST /v0/management/quota/reconcile` for the selected auth
+- Lets you filter auth rows by provider or Codex-only view
+- Lets you enable/disable auth entries, edit common auth fields, and trigger `POST /v0/management/quota/reconcile`
+- Lists available models from `GET /v0/management/models`
+- Shows recent usage logs from `GET /v0/management/usage/logs`
+- Shows system log lines from `GET /v0/management/logs`
 
 Run locally:
 
@@ -17,6 +20,8 @@ dotnet run --project .\examples\CliRelay.CodexSwitchDashboard\CliRelay.CodexSwit
 ```
 
 Default management base URL is `http://127.0.0.1:8317`.
+
+The dashboard does not persist the management key locally. Enter it each time before refreshing.
 
 Note:
 
