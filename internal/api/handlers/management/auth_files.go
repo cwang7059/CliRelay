@@ -699,13 +699,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if planType := normalizeTagValue(metadataString(auth.Metadata, "plan_type", "planType")); planType != "" {
 		entry["plan_type"] = planType
 	}
-	if accountID := strings.TrimSpace(metadataString(
-		auth.Metadata,
-		"chatgpt_account_id",
-		"chatgptAccountId",
-		"account_id",
-		"accountId",
-	)); accountID != "" {
+	if accountID := codexAccountIDFromMetadata(auth.Metadata); accountID != "" {
 		entry["account_id"] = accountID
 	}
 	addSubscriptionFields(entry, auth.Metadata, time.Now())
@@ -979,6 +973,8 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 			if err == nil && claims != nil {
 				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
 					result["chatgpt_account_id"] = v
+				} else if v := codexDefaultOrganizationID(claims); v != "" {
+					result["chatgpt_account_id"] = v
 				}
 				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
 					result["plan_type"] = v
@@ -1014,6 +1010,73 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 		return nil
 	}
 	return result
+}
+
+func codexAccountIDFromMetadata(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	if v := strings.TrimSpace(metadataString(
+		metadata,
+		"chatgpt_account_id",
+		"chatgptAccountId",
+		"account_id",
+		"accountId",
+	)); v != "" {
+		return v
+	}
+	idToken := strings.TrimSpace(metadataString(metadata, "id_token", "idToken"))
+	if idToken == "" {
+		return ""
+	}
+	claims, err := codex.ParseJWTToken(idToken)
+	if err != nil || claims == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+		return v
+	}
+	return codexDefaultOrganizationID(claims)
+}
+
+func codexDefaultOrganizationID(claims *codex.JWTClaims) string {
+	if claims == nil {
+		return ""
+	}
+	for _, org := range claims.CodexAuthInfo.Organizations {
+		if org.IsDefault {
+			return strings.TrimSpace(org.ID)
+		}
+	}
+	if len(claims.CodexAuthInfo.Organizations) > 0 {
+		return strings.TrimSpace(claims.CodexAuthInfo.Organizations[0].ID)
+	}
+	return ""
+}
+
+func normalizeCodexAuthMetadata(provider string, metadata map[string]any) bool {
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") || len(metadata) == 0 {
+		return false
+	}
+	accountID := codexAccountIDFromMetadata(metadata)
+	if accountID == "" {
+		return false
+	}
+
+	changed := false
+	if strings.TrimSpace(metadataString(metadata, "account_id", "accountId")) == "" {
+		metadata["account_id"] = accountID
+		changed = true
+	}
+	if strings.TrimSpace(metadataString(metadata, "chatgpt_account_id", "chatgptAccountId")) == "" {
+		metadata["chatgpt_account_id"] = accountID
+		changed = true
+	}
+	if strings.TrimSpace(metadataString(metadata, "account_structure", "accountStructure")) == "" {
+		metadata["account_structure"] = "personal"
+		changed = true
+	}
+	return changed
 }
 
 func authEmail(auth *coreauth.Auth) string {
@@ -1292,6 +1355,15 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
+	}
+	if normalizeCodexAuthMetadata(provider, metadata) {
+		normalizedData, errMarshal := json.Marshal(metadata)
+		if errMarshal != nil {
+			return fmt.Errorf("failed to normalize auth file: %w", errMarshal)
+		}
+		if errWrite := os.WriteFile(path, normalizedData, 0o600); errWrite != nil {
+			return fmt.Errorf("failed to write normalized auth file: %w", errWrite)
+		}
 	}
 	label := authChannelLabelFromMetadata(metadata, provider)
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)

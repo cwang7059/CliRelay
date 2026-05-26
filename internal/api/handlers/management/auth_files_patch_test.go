@@ -390,6 +390,49 @@ func TestBuildAuthFileEntryExposesMetadataPlanTypeBeforeIDTokenClaim(t *testing.
 	}
 }
 
+func TestBuildAuthFileEntryBackfillsCodexAccountIDFromDefaultOrganization(t *testing.T) {
+	idToken := makeManagementJWTForTest(t, map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type": "free",
+			"organizations": []any{
+				map[string]any{
+					"id":         "org-default",
+					"is_default":  true,
+					"role":        "owner",
+					"title":       "Personal",
+				},
+			},
+			"user_id": "user-abc123",
+		},
+	})
+	auth := &coreauth.Auth{
+		ID:       "codex-missing-account",
+		FileName: "codex-missing-account.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": "codex-missing-account.json",
+		},
+		Metadata: map[string]any{
+			"id_token": idToken,
+		},
+	}
+
+	entry := (&Handler{}).buildAuthFileEntry(auth)
+	if entry == nil {
+		t.Fatal("expected auth file entry")
+	}
+	if got, _ := entry["account_id"].(string); got != "org-default" {
+		t.Fatalf("account_id = %q, want org-default", got)
+	}
+	claims, ok := entry["id_token"].(gin.H)
+	if !ok {
+		t.Fatalf("id_token type = %T, want gin.H", entry["id_token"])
+	}
+	if got, _ := claims["chatgpt_account_id"].(string); got != "org-default" {
+		t.Fatalf("id_token.chatgpt_account_id = %q, want org-default", got)
+	}
+}
+
 func makeManagementJWTForTest(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	encode := func(v any) string {

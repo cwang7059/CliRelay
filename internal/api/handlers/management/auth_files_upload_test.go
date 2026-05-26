@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -149,6 +150,78 @@ func TestRegisterAuthFromFileAppliesRoutingMetadata(t *testing.T) {
 	}
 	if auth.ProxyID != "premium-egress" {
 		t.Fatalf("ProxyID = %q, want premium-egress", auth.ProxyID)
+	}
+}
+
+func TestRegisterAuthFromFilePersistsCodexAccountIDFromDefaultOrganization(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	h := &Handler{
+		cfg: &config.Config{
+			AuthDir: authDir,
+		},
+		authManager: manager,
+	}
+
+	idToken := makeManagementJWTForTest(t, map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type": "free",
+			"organizations": []any{
+				map[string]any{
+					"id":         "org-default",
+					"is_default": true,
+					"role":       "owner",
+					"title":      "Personal",
+				},
+			},
+		},
+	})
+	data, err := json.Marshal(map[string]any{
+		"type":     "codex",
+		"email":    "free@example.com",
+		"id_token": idToken,
+	})
+	if err != nil {
+		t.Fatalf("Marshal payload: %v", err)
+	}
+
+	fileName := "codex-free.json"
+	absPath := filepath.Join(authDir, fileName)
+	if err := os.WriteFile(absPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := h.registerAuthFromFile(context.Background(), absPath, data); err != nil {
+		t.Fatalf("registerAuthFromFile: %v", err)
+	}
+
+	auth, ok := manager.GetByID(fileName)
+	if !ok || auth == nil {
+		t.Fatalf("registered auth not found")
+	}
+	if got, _ := auth.Metadata["account_id"].(string); got != "org-default" {
+		t.Fatalf("registered account_id = %q, want org-default", got)
+	}
+	if got, _ := auth.Metadata["chatgpt_account_id"].(string); got != "org-default" {
+		t.Fatalf("registered chatgpt_account_id = %q, want org-default", got)
+	}
+
+	savedData, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatalf("ReadFile normalized auth: %v", err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(savedData, &saved); err != nil {
+		t.Fatalf("Unmarshal normalized auth: %v", err)
+	}
+	if got, _ := saved["account_id"].(string); got != "org-default" {
+		t.Fatalf("saved account_id = %q, want org-default", got)
+	}
+	if got, _ := saved["chatgpt_account_id"].(string); got != "org-default" {
+		t.Fatalf("saved chatgpt_account_id = %q, want org-default", got)
 	}
 }
 
