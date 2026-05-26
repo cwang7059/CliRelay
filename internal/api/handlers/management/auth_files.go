@@ -699,6 +699,15 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if planType := normalizeTagValue(metadataString(auth.Metadata, "plan_type", "planType")); planType != "" {
 		entry["plan_type"] = planType
 	}
+	if accountID := strings.TrimSpace(metadataString(
+		auth.Metadata,
+		"chatgpt_account_id",
+		"chatgptAccountId",
+		"account_id",
+		"accountId",
+	)); accountID != "" {
+		entry["account_id"] = accountID
+	}
 	addSubscriptionFields(entry, auth.Metadata, time.Now())
 	if !auth.CreatedAt.IsZero() {
 		entry["created_at"] = auth.CreatedAt
@@ -961,31 +970,44 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	idTokenRaw, ok := auth.Metadata["id_token"].(string)
-	if !ok {
-		return nil
-	}
-	idToken := strings.TrimSpace(idTokenRaw)
-	if idToken == "" {
-		return nil
-	}
-	claims, err := codex.ParseJWTToken(idToken)
-	if err != nil || claims == nil {
-		return nil
+	result := gin.H{}
+
+	if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok {
+		idToken := strings.TrimSpace(idTokenRaw)
+		if idToken != "" {
+			claims, err := codex.ParseJWTToken(idToken)
+			if err == nil && claims != nil {
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+					result["chatgpt_account_id"] = v
+				}
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
+					result["plan_type"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+					result["chatgpt_subscription_active_start"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+					result["chatgpt_subscription_active_until"] = v
+				}
+			}
+		}
 	}
 
-	result := gin.H{}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
-		result["chatgpt_account_id"] = v
+	if _, ok := result["chatgpt_account_id"]; !ok {
+		if v := strings.TrimSpace(metadataString(
+			auth.Metadata,
+			"chatgpt_account_id",
+			"chatgptAccountId",
+			"account_id",
+			"accountId",
+		)); v != "" {
+			result["chatgpt_account_id"] = v
+		}
 	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-		result["plan_type"] = v
-	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
-		result["chatgpt_subscription_active_start"] = v
-	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
-		result["chatgpt_subscription_active_until"] = v
+	if _, ok := result["plan_type"]; !ok {
+		if v := strings.TrimSpace(metadataString(auth.Metadata, "plan_type", "planType")); v != "" {
+			result["plan_type"] = v
+		}
 	}
 
 	if len(result) == 0 {

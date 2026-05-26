@@ -42,8 +42,17 @@ func TestCcSwitchImportConfigsManagementHandlersUseDatabase(t *testing.T) {
     "client-type": "claude",
     "provider-name": "Relay Claude",
     "note": "Team preset",
+    "enabled": false,
     "default-model": "claude-sonnet-4-5",
+    "model-mappings": [
+      {
+        "role": "main",
+        "request-model": "claude-main-router",
+        "target-model": "claude-sonnet-4-5"
+      }
+    ],
     "allowed-channel-groups": ["team-a", "team-b"],
+    "route-path": "team-a/cs_relay",
     "endpoint-path": "/anthropic",
     "usage-auto-interval": 45,
     "api-key-field": "ANTHROPIC_AUTH_TOKEN"
@@ -83,8 +92,57 @@ func TestCcSwitchImportConfigsManagementHandlersUseDatabase(t *testing.T) {
 	if got.Items[0]["provider-name"] != "Relay Claude" {
 		t.Fatalf("provider-name = %#v, want Relay Claude", got.Items[0]["provider-name"])
 	}
+	if got.Items[0]["enabled"] != false {
+		t.Fatalf("enabled = %#v, want false", got.Items[0]["enabled"])
+	}
+	if got.Items[0]["route-path"] != "/team-a/cs_relay" {
+		t.Fatalf("route-path = %#v, want /team-a/cs_relay", got.Items[0]["route-path"])
+	}
 	if got.Items[0]["api-key-field"] != "ANTHROPIC_AUTH_TOKEN" {
 		t.Fatalf("api-key-field = %#v, want ANTHROPIC_AUTH_TOKEN", got.Items[0]["api-key-field"])
+	}
+	mappings, ok := got.Items[0]["model-mappings"].([]any)
+	if !ok || len(mappings) != 1 {
+		t.Fatalf("model-mappings = %#v, want one mapping", got.Items[0]["model-mappings"])
+	}
+	mapping, ok := mappings[0].(map[string]any)
+	if !ok || mapping["role"] != "main" || mapping["request-model"] != "claude-main-router" {
+		t.Fatalf("model-mapping = %#v, want main claude-main-router", mappings[0])
+	}
+}
+
+func TestPutCcSwitchImportConfigsDefaultsMissingEnabledToTrue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupPermissionProfilesTestDB(t)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/ccswitch-import-configs",
+		bytes.NewReader([]byte(`[{"id":"cfg-legacy","client-type":"codex","provider-name":"Relay","default-model":"gpt-5.5"}]`)),
+	)
+
+	h := NewHandler(&config.Config{}, "", nil)
+	h.PutCcSwitchImportConfigs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	getRec := httptest.NewRecorder()
+	getCtx, _ := gin.CreateTestContext(getRec)
+	getCtx.Request = httptest.NewRequest(http.MethodGet, "/ccswitch-import-configs", nil)
+	h.GetCcSwitchImportConfigs(getCtx)
+
+	var got struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal GET response: %v", err)
+	}
+	if len(got.Items) != 1 || got.Items[0]["enabled"] != true {
+		t.Fatalf("enabled = %#v, want true", got.Items)
 	}
 }
 
