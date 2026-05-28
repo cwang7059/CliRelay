@@ -230,7 +230,7 @@ internal sealed class AuthFilesPage : ManagementPageBase
     {
         var response = await Client.GetAuthFilesAsync();
         _files = response?.Files
-            .OrderBy(entry => entry.Disabled)
+            .OrderBy(GetAvailabilityRank)
             .ThenBy(entry => entry.Provider)
             .ThenBy(entry => entry.Name)
             .ToList() ?? [];
@@ -607,6 +607,37 @@ internal sealed class AuthFilesPage : ManagementPageBase
         }
 
         return _files.FirstOrDefault(entry => string.Equals(entry.Name, _selectedName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static int GetAvailabilityRank(AuthFileEntry entry)
+    {
+        if (entry.Disabled || entry.Recoverable ||
+            string.Equals(entry.Status, "disabled", StringComparison.OrdinalIgnoreCase) ||
+            ContainsAuthFailure(entry.StatusMessage))
+        {
+            return 2;
+        }
+
+        if (entry.Unavailable ||
+            string.Equals(entry.Status, "error", StringComparison.OrdinalIgnoreCase) ||
+            entry.Restrictions.Count > 0 ||
+            (entry.NextRetryAfter.HasValue && entry.NextRetryAfter.Value > DateTimeOffset.Now))
+        {
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private static bool ContainsAuthFailure(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return value.Contains("401", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("unauthorized", StringComparison.OrdinalIgnoreCase);
     }
 
     private void ClearSelectionState()

@@ -567,12 +567,80 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			files = append(files, entry)
 		}
 	}
-	sort.Slice(files, func(i, j int) bool {
-		nameI, _ := files[i]["name"].(string)
-		nameJ, _ := files[j]["name"].(string)
-		return strings.ToLower(nameI) < strings.ToLower(nameJ)
-	})
+	sortAuthFileEntries(files)
 	c.JSON(200, gin.H{"files": files})
+}
+
+func sortAuthFileEntries(files []gin.H) {
+	sort.SliceStable(files, func(i, j int) bool {
+		rankI := authFileAvailabilityRank(files[i])
+		rankJ := authFileAvailabilityRank(files[j])
+		if rankI != rankJ {
+			return rankI < rankJ
+		}
+		providerI := strings.ToLower(strings.TrimSpace(ginString(files[i], "provider", "type")))
+		providerJ := strings.ToLower(strings.TrimSpace(ginString(files[j], "provider", "type")))
+		if providerI != providerJ {
+			return providerI < providerJ
+		}
+		return strings.ToLower(strings.TrimSpace(ginString(files[i], "name", "id"))) <
+			strings.ToLower(strings.TrimSpace(ginString(files[j], "name", "id")))
+	})
+}
+
+func authFileAvailabilityRank(entry gin.H) int {
+	if entry == nil {
+		return 3
+	}
+	status := strings.ToLower(strings.TrimSpace(ginString(entry, "status")))
+	statusMessage := strings.ToLower(strings.TrimSpace(ginString(entry, "status_message")))
+	if ginBool(entry, "disabled") || ginBool(entry, "recoverable") || status == string(coreauth.StatusDisabled) ||
+		strings.Contains(statusMessage, "401") || strings.Contains(statusMessage, "unauthorized") {
+		return 2
+	}
+	if ginBool(entry, "unavailable") || status == string(coreauth.StatusError) || authFileHasRestrictions(entry) {
+		return 1
+	}
+	return 0
+}
+
+func authFileHasRestrictions(entry gin.H) bool {
+	raw, ok := entry["restrictions"]
+	if !ok || raw == nil {
+		return false
+	}
+	switch typed := raw.(type) {
+	case []gin.H:
+		return len(typed) > 0
+	case []map[string]any:
+		return len(typed) > 0
+	case []any:
+		return len(typed) > 0
+	default:
+		return false
+	}
+}
+
+func ginString(entry gin.H, keys ...string) string {
+	for _, key := range keys {
+		if raw, ok := entry[key]; ok {
+			if text, ok := raw.(string); ok {
+				return text
+			}
+			if raw != nil {
+				return fmt.Sprint(raw)
+			}
+		}
+	}
+	return ""
+}
+
+func ginBool(entry gin.H, key string) bool {
+	raw, ok := entry[key]
+	if !ok {
+		return false
+	}
+	return coerceBool(raw)
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file

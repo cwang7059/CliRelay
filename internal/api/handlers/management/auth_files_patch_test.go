@@ -64,6 +64,50 @@ func TestIsCodex401RecoverableAllowsDisabledCodexOAuth(t *testing.T) {
 	}
 }
 
+func TestSortAuthFileEntriesPutsAvailableFirst(t *testing.T) {
+	files := []gin.H{
+		{
+			"name":        "disabled.json",
+			"provider":    "codex",
+			"status":      "disabled",
+			"disabled":    true,
+			"recoverable": true,
+		},
+		{
+			"name":         "limited.json",
+			"provider":     "codex",
+			"status":       "error",
+			"unavailable":  true,
+			"restrictions": []gin.H{{"scope": "auth"}},
+		},
+		{
+			"name":     "available-b.json",
+			"provider": "codex",
+			"status":   "active",
+		},
+		{
+			"name":     "available-a.json",
+			"provider": "codex",
+			"status":   "active",
+		},
+	}
+
+	sortAuthFileEntries(files)
+
+	got := []string{
+		files[0]["name"].(string),
+		files[1]["name"].(string),
+		files[2]["name"].(string),
+		files[3]["name"].(string),
+	}
+	want := []string{"available-a.json", "available-b.json", "limited.json", "disabled.json"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestSaveRecoveredCodexAuthOverwritesTargetAndReactivates(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
