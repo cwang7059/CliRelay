@@ -7,6 +7,11 @@ if (-not (Test-Path -LiteralPath $profilePath)) {
   New-Item -ItemType Directory -Path $profilePath | Out-Null
 }
 
+$firstRunMarker = Join-Path $profilePath "First Run"
+if (-not (Test-Path -LiteralPath $firstRunMarker)) {
+  New-Item -ItemType File -Path $firstRunMarker | Out-Null
+}
+
 $chromeCandidates = @(
   "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
   "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
@@ -20,6 +25,10 @@ if (-not $chromeCandidates -or $chromeCandidates.Count -eq 0) {
 $chrome = @($chromeCandidates)[0]
 $arguments = @(
   "--user-data-dir=$profilePath",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--disable-sync",
+  "--disable-features=ChromeWhatsNewUI,SigninInterception,SignInProfileCreation",
   "--load-extension=$extensionPath",
   "--disable-extensions-except=$extensionPath",
   "chrome://extensions/"
