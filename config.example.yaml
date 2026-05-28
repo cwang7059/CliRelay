@@ -144,6 +144,10 @@ force-model-prefix: false
 # Default is false (disabled).
 passthrough-headers: false
 
+# When true, permanent OAuth refresh failures keep auth files on disk and mark
+# the account unavailable instead of deleting it.
+preserve-invalid-auth-files: false
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 

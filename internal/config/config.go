@@ -98,6 +98,10 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// PreserveInvalidAuthFiles keeps auth files on disk when token refresh reports
+	// an unrecoverable auth error; affected accounts are marked unavailable instead.
+	PreserveInvalidAuthFiles bool `yaml:"preserve-invalid-auth-files" json:"preserve-invalid-auth-files"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.

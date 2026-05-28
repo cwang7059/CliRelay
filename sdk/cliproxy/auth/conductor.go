@@ -70,7 +70,8 @@ const (
 
 // PermanentAuthError indicates an unrecoverable authentication failure.
 // When an executor's Refresh method returns this error, the conductor
-// will automatically remove the credential from memory and disk.
+// will automatically remove the credential from memory and disk unless
+// PreserveInvalidAuthFiles is enabled in the runtime config.
 type PermanentAuthError struct {
 	Reason string
 	Cause  error
@@ -178,6 +179,8 @@ type Manager struct {
 	// runtimeConfig stores the latest application config for request-time decisions.
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
+
+	preserveInvalidAuthFiles atomic.Bool
 
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
@@ -293,6 +296,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	m.preserveInvalidAuthFiles.Store(cfg.PreserveInvalidAuthFiles)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
@@ -2534,8 +2538,29 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	now := time.Now()
 	if err != nil {
 		// If the error is permanent (e.g. invalid_grant, refresh_token_reused),
-		// remove the credential from memory and disk.
+		// remove the credential from memory and disk unless preservation is enabled.
 		if IsPermanentAuthError(err) {
+			if m.preserveInvalidAuthFiles.Load() {
+				log.Warnf("permanent refresh failure for %s (%s): %v; preserving credential file", auth.ID, auth.Provider, err)
+				m.mu.Lock()
+				if current := m.auths[id]; current != nil {
+					current.Unavailable = true
+					current.Status = StatusError
+					current.StatusMessage = "unauthorized"
+					current.NextRetryAfter = now.Add(24 * time.Hour)
+					current.NextRefreshAfter = now.Add(24 * time.Hour)
+					current.LastError = &Error{Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+					current.UpdatedAt = now
+					m.auths[id] = current
+				}
+				m.mu.Unlock()
+				if current, ok := m.GetByID(id); ok && current != nil {
+					if _, updateErr := m.Update(ctx, current); updateErr != nil {
+						log.Errorf("failed to persist preserved invalid auth %s: %v", id, updateErr)
+					}
+				}
+				return
+			}
 			log.Warnf("permanent refresh failure for %s (%s): %v — removing credential", auth.ID, auth.Provider, err)
 			m.mu.Lock()
 			delete(m.auths, id)

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -99,6 +100,51 @@ func TestRefreshAuth_PermanentError_RemovesCredential(t *testing.T) {
 	}
 	if store.lastDeleted != "test-auth-1" {
 		t.Fatalf("expected Delete for 'test-auth-1', got '%s'", store.lastDeleted)
+	}
+}
+
+func TestRefreshAuth_PermanentError_PreservesCredentialWhenConfigured(t *testing.T) {
+	store := &trackingStore{}
+	mgr := NewManager(store, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{PreserveInvalidAuthFiles: true})
+
+	auth := &Auth{
+		ID:       "test-auth-preserve",
+		Provider: "test-provider",
+		Metadata: map[string]any{"type": "codex"},
+	}
+
+	ctx := WithSkipPersist(context.Background())
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	mgr.RegisterExecutor(&stubExecutor{
+		refreshErr: &PermanentAuthError{
+			Reason: "credential revoked",
+			Cause:  fmt.Errorf("invalid_grant"),
+		},
+	})
+
+	mgr.refreshAuth(context.Background(), auth.ID)
+
+	current, ok := mgr.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("expected auth to be preserved in memory after permanent error")
+	}
+	if current.Status != StatusError || !current.Unavailable {
+		t.Fatalf("expected preserved auth to be unavailable with error status, got status=%q unavailable=%v", current.Status, current.Unavailable)
+	}
+	if current.LastError == nil || current.LastError.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized LastError, got %#v", current.LastError)
+	}
+	if current.NextRefreshAfter.IsZero() || current.NextRetryAfter.IsZero() {
+		t.Fatal("expected retry and refresh backoff to be set")
+	}
+	if got := store.deleteCount.Load(); got != 0 {
+		t.Fatalf("expected 0 Delete calls, got %d", got)
+	}
+	if got := store.saveCount.Load(); got != 1 {
+		t.Fatalf("expected 1 Save call for preserved state, got %d", got)
 	}
 }
 
