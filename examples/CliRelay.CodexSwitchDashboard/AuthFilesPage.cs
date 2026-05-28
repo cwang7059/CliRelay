@@ -16,6 +16,7 @@ internal sealed class AuthFilesPage : ManagementPageBase
     private readonly TextBox _rawJsonTextBox;
     private readonly Button _saveFieldsButton;
     private readonly Button _toggleDisabledButton;
+    private readonly Button _recoverButton;
     private readonly Button _reconcileButton;
     private readonly Button _copyJsonButton;
 
@@ -191,6 +192,10 @@ internal sealed class AuthFilesPage : ManagementPageBase
         _toggleDisabledButton.Click += async (_, _) => await ToggleSelectedStatusAsync();
         buttonRow.Controls.Add(_toggleDisabledButton);
 
+        _recoverButton = CreateActionButton("Recover 401");
+        _recoverButton.Click += async (_, _) => await RecoverSelected401Async();
+        buttonRow.Controls.Add(_recoverButton);
+
         _reconcileButton = CreateActionButton("Reconcile quota");
         _reconcileButton.Click += async (_, _) => await ReconcileSelectedQuotaAsync();
         buttonRow.Controls.Add(_reconcileButton);
@@ -299,6 +304,7 @@ internal sealed class AuthFilesPage : ManagementPageBase
 
         DashboardStyles.StyleSecondaryButton(_saveFieldsButton, Palette);
         DashboardStyles.StyleSecondaryButton(_toggleDisabledButton, Palette);
+        DashboardStyles.StyleSecondaryButton(_recoverButton, Palette);
         DashboardStyles.StyleSecondaryButton(_reconcileButton, Palette);
         DashboardStyles.StyleSecondaryButton(_copyJsonButton, Palette);
     }
@@ -437,6 +443,7 @@ internal sealed class AuthFilesPage : ManagementPageBase
         _proxyUrlTextBox.Text = string.Empty;
         _proxyIdTextBox.Text = string.Empty;
         _toggleDisabledButton.Text = file.Disabled ? "Enable" : "Disable";
+        _recoverButton.Enabled = file.Recoverable;
 
         if (file.Restrictions.Count == 0)
         {
@@ -515,6 +522,64 @@ internal sealed class AuthFilesPage : ManagementPageBase
         await RefreshAsync();
     }
 
+    private async Task RecoverSelected401Async()
+    {
+        var selected = GetSelectedFile();
+        if (selected is null)
+        {
+            ReportStatus("Select an auth file first.", true);
+            return;
+        }
+
+        if (!selected.Recoverable)
+        {
+            ReportStatus("Selected auth is not marked recoverable.", true);
+            return;
+        }
+
+        _recoverButton.Enabled = false;
+        try
+        {
+            var recovery = await Client.RecoverCodex401Async(selected.Name ?? string.Empty, false);
+            if (recovery is null || string.IsNullOrWhiteSpace(recovery.Url) || string.IsNullOrWhiteSpace(recovery.State))
+            {
+                ReportStatus("Recovery did not return an OAuth URL.", true);
+                return;
+            }
+
+            OpenUrl(recovery.Url);
+            ReportStatus($"OAuth recovery started for {selected.Name}.", false);
+            await PollRecoveryAsync(recovery.State, selected.Name ?? "auth file");
+        }
+        finally
+        {
+            _recoverButton.Enabled = GetSelectedFile()?.Recoverable == true;
+        }
+    }
+
+    private async Task PollRecoveryAsync(string state, string name)
+    {
+        for (var attempt = 0; attempt < 300; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            var status = await Client.GetAuthStatusAsync(state);
+            if (string.Equals(status?.Status, "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                ReportStatus($"Recovered {name}.", false);
+                await RefreshAsync();
+                return;
+            }
+
+            if (string.Equals(status?.Status, "error", StringComparison.OrdinalIgnoreCase))
+            {
+                ReportStatus(status?.Error ?? "OAuth recovery failed.", true);
+                return;
+            }
+        }
+
+        ReportStatus($"OAuth recovery is still waiting for {name}.", false);
+    }
+
     private async Task ReconcileSelectedQuotaAsync()
     {
         var selected = GetSelectedFile();
@@ -554,8 +619,18 @@ internal sealed class AuthFilesPage : ManagementPageBase
         _prefixTextBox.Clear();
         _proxyUrlTextBox.Clear();
         _proxyIdTextBox.Clear();
+        _recoverButton.Enabled = false;
         _restrictionsTextBox.Text = string.Empty;
         _rawJsonTextBox.Text = string.Empty;
+    }
+
+    private static void OpenUrl(string url)
+    {
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = url,
+            UseShellExecute = true
+        });
     }
 
     private static string? NullIfWhiteSpace(string value)

@@ -102,6 +102,23 @@ internal sealed class ManagementApiClient : IDisposable
         return SendJsonAsync(HttpMethod.Post, "/v0/management/quota/reconcile", new { auth_index = authIndex });
     }
 
+    public Task<AuthRecoveryResponse?> RecoverCodex401Async(string name, bool openBrowser)
+    {
+        return SendJsonForResultAsync<AuthRecoveryResponse>(
+            HttpMethod.Post,
+            "/v0/management/auth-files/recover-401",
+            new AuthRecoveryRequest
+            {
+                Name = name,
+                OpenBrowser = openBrowser
+            });
+    }
+
+    public Task<AuthStatusResponse?> GetAuthStatusAsync(string state)
+    {
+        return GetJsonAsync<AuthStatusResponse>($"/v0/management/get-auth-status?state={Uri.EscapeDataString(state)}");
+    }
+
     private async Task<T?> GetJsonAsync<T>(string path)
     {
         using var response = await SendAsync(HttpMethod.Get, path);
@@ -120,6 +137,20 @@ internal sealed class ManagementApiClient : IDisposable
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
         using var response = await SendAsync(method, path, content);
         _ = await response.Content.ReadAsStringAsync();
+    }
+
+    private async Task<T?> SendJsonForResultAsync<T>(HttpMethod method, string path, object payload)
+    {
+        var json = JsonSerializer.Serialize(payload, WriteJsonOptions);
+        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        using var response = await SendAsync(method, path, content);
+        var body = await response.Content.ReadAsStringAsync();
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return default;
+        }
+
+        return JsonSerializer.Deserialize<T>(body, ReadJsonOptions);
     }
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, HttpContent? content = null)
@@ -455,6 +486,9 @@ internal sealed class AuthFileEntry
     [JsonPropertyName("unavailable")]
     public bool Unavailable { get; set; }
 
+    [JsonPropertyName("recoverable")]
+    public bool Recoverable { get; set; }
+
     [JsonPropertyName("runtime_only")]
     public bool RuntimeOnly { get; set; }
 
@@ -691,4 +725,40 @@ internal sealed class AuthFieldPatchRequest
 
     [JsonPropertyName("proxy_id")]
     public string? ProxyId { get; set; }
+}
+
+internal sealed class AuthRecoveryRequest
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("open_browser")]
+    public bool OpenBrowser { get; set; }
+}
+
+internal sealed class AuthRecoveryResponse
+{
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
+
+    [JsonPropertyName("url")]
+    public string? Url { get; set; }
+
+    [JsonPropertyName("state")]
+    public string? State { get; set; }
+
+    [JsonPropertyName("opened")]
+    public bool Opened { get; set; }
+
+    [JsonPropertyName("open_error")]
+    public string? OpenError { get; set; }
+}
+
+internal sealed class AuthStatusResponse
+{
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }
 }

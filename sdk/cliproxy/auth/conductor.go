@@ -1894,6 +1894,11 @@ func disableAuthAfterUnauthorized(auth *Auth, resultErr *Error, now time.Time) {
 	auth.NextRetryAfter = time.Time{}
 	auth.NextRefreshAfter = time.Time{}
 	auth.UpdatedAt = now
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["disabled"] = true
+	auth.Metadata["disabled_reason"] = "401_unauthorized"
 	if resultErr != nil {
 		auth.LastError = cloneError(resultErr)
 	} else if auth.LastError == nil {

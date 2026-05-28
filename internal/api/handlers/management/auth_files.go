@@ -29,6 +29,7 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -405,11 +406,23 @@ func startCallbackForwarderOnAvailablePort(preferredPort int, provider, targetBa
 	if err == nil {
 		return forwarder, port, nil
 	}
-	if !errors.Is(err, syscall.EADDRINUSE) {
+	if !isAddressInUseError(err) {
 		return nil, 0, err
 	}
 	log.WithError(err).Warnf("callback forwarder for %s could not listen on preferred port %d, trying a free port", provider, preferredPort)
 	return startCallbackForwarderOnExactPort(0, provider, targetBase)
+}
+
+func isAddressInUseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	raw := strings.ToLower(err.Error())
+	return strings.Contains(raw, "address already in use") ||
+		strings.Contains(raw, "only one usage of each socket address")
 }
 
 func startCallbackForwarderOnExactPort(port int, provider, targetBase string) (*callbackForwarder, int, error) {
@@ -676,6 +689,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"status_message": auth.StatusMessage,
 		"disabled":       auth.Disabled,
 		"unavailable":    auth.Unavailable,
+		"recoverable":    isCodex401Recoverable(auth),
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
@@ -2266,51 +2280,119 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
-func (h *Handler) RequestCodexToken(c *gin.Context) {
-	ctx := detachedAuthContext(c)
+type codexOAuthStartOptions struct {
+	Recovery                 *oauthRecoveryContext
+	UseCallbackForwarder     bool
+	RequireCallbackForwarder bool
+	OpenBrowser              bool
+}
 
-	fmt.Println("Initializing Codex authentication...")
+type codexOAuthStartResult struct {
+	URL       string
+	State     string
+	Opened    bool
+	OpenError string
+}
 
-	// Generate PKCE codes
+func codexTokenRecordFromBundle(openaiAuth *codex.CodexAuth, bundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
+	if openaiAuth == nil {
+		return nil, fmt.Errorf("codex auth service is nil")
+	}
+	if bundle == nil {
+		return nil, fmt.Errorf("codex auth bundle is nil")
+	}
+
+	tokenStorage := openaiAuth.CreateTokenStorage(bundle)
+	if tokenStorage == nil || strings.TrimSpace(tokenStorage.Email) == "" {
+		return nil, fmt.Errorf("codex token storage missing account information")
+	}
+
+	planType := ""
+	hashAccountID := ""
+	accountID := strings.TrimSpace(tokenStorage.AccountID)
+	if claims, _ := codex.ParseJWTToken(tokenStorage.IDToken); claims != nil {
+		planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		if id := strings.TrimSpace(claims.GetAccountID()); id != "" {
+			accountID = id
+			digest := sha256.Sum256([]byte(id))
+			hashAccountID = hex.EncodeToString(digest[:])[:8]
+		}
+	}
+
+	metadata := map[string]any{
+		"email": strings.TrimSpace(tokenStorage.Email),
+	}
+	if accountID != "" {
+		metadata["account_id"] = accountID
+		metadata["chatgpt_account_id"] = accountID
+	}
+	if plan := strings.ToLower(strings.TrimSpace(planType)); plan != "" {
+		metadata["plan_type"] = plan
+	}
+
+	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+	return &coreauth.Auth{
+		ID:       fileName,
+		Provider: "codex",
+		FileName: fileName,
+		Storage:  tokenStorage,
+		Metadata: metadata,
+	}, nil
+}
+
+func (h *Handler) startCodexOAuthFlow(ctx context.Context, opts codexOAuthStartOptions) (*codexOAuthStartResult, error) {
+	if h == nil || h.cfg == nil {
+		return nil, fmt.Errorf("handler config unavailable")
+	}
+
 	pkceCodes, err := codex.GeneratePKCECodes()
 	if err != nil {
-		log.Errorf("Failed to generate PKCE codes: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
-		return
+		return nil, fmt.Errorf("failed to generate PKCE codes: %w", err)
 	}
 
-	// Generate random state parameter
 	state, err := misc.GenerateRandomState()
 	if err != nil {
-		log.Errorf("Failed to generate state parameter: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
-		return
+		return nil, fmt.Errorf("failed to generate state parameter: %w", err)
 	}
 
-	// Initialize Codex auth service
 	openaiAuth := codex.NewCodexAuth(h.cfg)
-
-	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
-		log.Errorf("Failed to generate authorization URL: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return
+		return nil, fmt.Errorf("failed to generate authorization url: %w", err)
 	}
 
-	RegisterOAuthSession(state, "codex")
-
-	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
-	if isWebUI {
+	if opts.UseCallbackForwarder {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
 		if errTarget != nil {
-			log.WithError(errTarget).Warn("failed to compute codex callback target; continuing with manual callback submission")
-		} else {
-			var errStart error
-			if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
-				log.WithError(errStart).Warn("failed to start codex callback forwarder; continuing with manual callback submission")
+			if opts.RequireCallbackForwarder {
+				return nil, fmt.Errorf("callback server unavailable: %w", errTarget)
 			}
+			log.WithError(errTarget).Warn("failed to compute codex callback target; continuing with manual callback submission")
+		} else if forwarder, err = startCallbackForwarder(codexCallbackPort, "codex", targetURL); err != nil {
+			if opts.RequireCallbackForwarder {
+				return nil, fmt.Errorf("failed to start callback server: %w", err)
+			}
+			log.WithError(err).Warn("failed to start codex callback forwarder; continuing with manual callback submission")
+		}
+	}
+
+	if opts.Recovery != nil {
+		RegisterOAuthSessionRecovery(state, "codex", opts.Recovery)
+	} else {
+		RegisterOAuthSession(state, "codex")
+	}
+
+	result := &codexOAuthStartResult{
+		URL:   authURL,
+		State: state,
+	}
+	if opts.OpenBrowser {
+		if errOpen := browser.OpenURL(authURL); errOpen != nil {
+			result.OpenError = errOpen.Error()
+			log.WithError(errOpen).Warn("failed to open browser for codex oauth recovery")
+		} else {
+			result.Opened = true
 		}
 	}
 
@@ -2319,7 +2401,6 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(ctx, codexCallbackPort, forwarder)
 		}
 
-		// Wait for callback file
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
 		deadline := time.Now().Add(oauthCallbackWaitTimeout)
 		var code string
@@ -2356,7 +2437,6 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 
 		log.Debug("Authorization code received, exchanging for tokens...")
-		// Exchange code for tokens using internal auth service
 		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
@@ -2365,33 +2445,13 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			return
 		}
 
-		// Extract additional info for filename generation
-		claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken)
-		planType := ""
-		hashAccountID := ""
-		if claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-			if accountID := claims.GetAccountID(); accountID != "" {
-				digest := sha256.Sum256([]byte(accountID))
-				hashAccountID = hex.EncodeToString(digest[:])[:8]
-			}
+		record, errRecord := codexTokenRecordFromBundle(openaiAuth, bundle)
+		if errRecord != nil {
+			SetOAuthSessionError(state, "Failed to build authentication token record")
+			log.Errorf("Failed to build Codex token record: %v", errRecord)
+			return
 		}
-
-		// Create token storage and persist
-		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
-		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "codex",
-			FileName: fileName,
-			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-				"plan_type":  strings.ToLower(planType),
-			},
-		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveCodexOAuthRecord(ctx, state, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
@@ -2406,7 +2466,379 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		CompleteOAuthSessionsByProvider("codex")
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	return result, nil
+}
+
+func (h *Handler) saveCodexOAuthRecord(ctx context.Context, state string, record *coreauth.Auth) (string, error) {
+	if recovery, ok := GetOAuthSessionRecovery(state); ok && recovery != nil {
+		return h.saveRecoveredCodexAuth(ctx, recovery, record)
+	}
+	return h.saveAndActivateTokenRecord(ctx, record)
+}
+
+func (h *Handler) RecoverCodex401AuthFile(c *gin.Context) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name        string `json:"name"`
+		OpenBrowser *bool  `json:"open_browser"`
+	}
+	if c.Request != nil && c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = strings.TrimSpace(c.Query("name"))
+	}
+	openBrowser := true
+	if req.OpenBrowser != nil {
+		openBrowser = *req.OpenBrowser
+	}
+	if raw := strings.TrimSpace(c.Query("open_browser")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "0", "false", "no", "off":
+			openBrowser = false
+		case "1", "true", "yes", "on":
+			openBrowser = true
+		}
+	}
+
+	target, err := h.findCodexRecoveryTarget(name)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if target == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "recoverable codex auth file not found"})
+		return
+	}
+
+	recovery := recoveryContextFromAuth(target)
+	if recovery == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "selected auth file cannot be recovered"})
+		return
+	}
+
+	result, err := h.startCodexOAuthFlow(detachedAuthContext(c), codexOAuthStartOptions{
+		Recovery:                 recovery,
+		UseCallbackForwarder:     true,
+		RequireCallbackForwarder: true,
+		OpenBrowser:              openBrowser,
+	})
+	if err != nil {
+		log.Errorf("Failed to start Codex recovery: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	payload := gin.H{
+		"status": "ok",
+		"url":    result.URL,
+		"state":  result.State,
+		"opened": result.Opened,
+		"target": gin.H{
+			"id":         recovery.TargetID,
+			"name":       recovery.TargetName,
+			"email":      recovery.TargetEmail,
+			"account_id": recovery.TargetAccountID,
+		},
+	}
+	if result.OpenError != "" {
+		payload["open_error"] = result.OpenError
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+func (h *Handler) findCodexRecoveryTarget(name string) (*coreauth.Auth, error) {
+	if h == nil || h.authManager == nil {
+		return nil, nil
+	}
+	name = strings.TrimSpace(name)
+	if name != "" {
+		if auth, ok := h.authManager.GetByID(name); ok && auth != nil {
+			if !isCodex401Recoverable(auth) {
+				return nil, fmt.Errorf("selected auth file is not recoverable")
+			}
+			return auth, nil
+		}
+		for _, auth := range h.authManager.List() {
+			if auth == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(auth.FileName), name) ||
+				strings.EqualFold(filepath.Base(strings.TrimSpace(auth.FileName)), name) {
+				if !isCodex401Recoverable(auth) {
+					return nil, fmt.Errorf("selected auth file is not recoverable")
+				}
+				return auth, nil
+			}
+		}
+		return nil, nil
+	}
+
+	auths := h.authManager.List()
+	sort.Slice(auths, func(i, j int) bool {
+		left := strings.ToLower(strings.TrimSpace(auths[i].FileName))
+		if left == "" {
+			left = strings.ToLower(strings.TrimSpace(auths[i].ID))
+		}
+		right := strings.ToLower(strings.TrimSpace(auths[j].FileName))
+		if right == "" {
+			right = strings.ToLower(strings.TrimSpace(auths[j].ID))
+		}
+		return left < right
+	})
+	for _, auth := range auths {
+		if isCodex401Recoverable(auth) {
+			return auth, nil
+		}
+	}
+	return nil, nil
+}
+
+func isCodex401Recoverable(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	if isRuntimeOnlyAuth(auth) {
+		return false
+	}
+	if !(auth.Disabled || auth.Status == coreauth.StatusDisabled) {
+		return false
+	}
+	if accountType, account := auth.AccountInfo(); strings.EqualFold(accountType, "oauth") && strings.TrimSpace(account) != "" {
+		return true
+	}
+	return authEmail(auth) != ""
+}
+
+func recoveryContextFromAuth(auth *coreauth.Auth) *oauthRecoveryContext {
+	if auth == nil || !isCodex401Recoverable(auth) {
+		return nil
+	}
+	fileName := strings.TrimSpace(auth.FileName)
+	if fileName == "" {
+		fileName = strings.TrimSpace(auth.ID)
+	}
+	name := fileName
+	if name == "" {
+		name = strings.TrimSpace(auth.ID)
+	}
+	path := strings.TrimSpace(authAttribute(auth, "path"))
+	return &oauthRecoveryContext{
+		TargetID:        strings.TrimSpace(auth.ID),
+		TargetName:      name,
+		TargetFileName:  fileName,
+		TargetPath:      path,
+		TargetEmail:     strings.ToLower(strings.TrimSpace(authEmail(auth))),
+		TargetAccountID: strings.TrimSpace(codexAccountIDFromMetadata(auth.Metadata)),
+	}
+}
+
+func (h *Handler) saveRecoveredCodexAuth(ctx context.Context, recovery *oauthRecoveryContext, record *coreauth.Auth) (string, error) {
+	if h == nil {
+		return "", fmt.Errorf("handler unavailable")
+	}
+	if recovery == nil {
+		return "", fmt.Errorf("recovery context is nil")
+	}
+	if record == nil {
+		return "", fmt.Errorf("token record is nil")
+	}
+
+	recordEmail := strings.ToLower(strings.TrimSpace(authEmail(record)))
+	if recordEmail == "" && record.Metadata != nil {
+		recordEmail = strings.ToLower(strings.TrimSpace(metadataString(record.Metadata, "email")))
+	}
+	if recovery.TargetEmail != "" && recordEmail != "" && !strings.EqualFold(recovery.TargetEmail, recordEmail) {
+		return "", fmt.Errorf("recovered account email mismatch: expected %s, got %s", recovery.TargetEmail, recordEmail)
+	}
+
+	recordAccountID := strings.TrimSpace(codexAccountIDFromMetadata(record.Metadata))
+	if recovery.TargetAccountID != "" && recordAccountID != "" && recovery.TargetAccountID != recordAccountID {
+		return "", fmt.Errorf("recovered account id mismatch")
+	}
+
+	var target *coreauth.Auth
+	if h.authManager != nil && recovery.TargetID != "" {
+		if auth, ok := h.authManager.GetByID(recovery.TargetID); ok {
+			target = auth
+		}
+	}
+
+	now := time.Now()
+	recovered := record.Clone()
+	if recovered.Metadata == nil {
+		recovered.Metadata = make(map[string]any)
+	}
+	if target != nil {
+		mergeRecoveredCodexMetadata(recovered.Metadata, target.Metadata)
+		recovered.Label = target.Label
+		recovered.Prefix = target.Prefix
+		recovered.ProxyURL = target.ProxyURL
+		recovered.ProxyID = target.ProxyID
+		recovered.CreatedAt = target.CreatedAt
+		recovered.Runtime = target.Runtime
+	}
+	if recovered.CreatedAt.IsZero() {
+		recovered.CreatedAt = now
+	}
+
+	targetID := strings.TrimSpace(recovery.TargetID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(recovery.TargetFileName)
+	}
+	if targetID == "" {
+		targetID = strings.TrimSpace(recovered.ID)
+	}
+	if targetID != "" {
+		recovered.ID = targetID
+	}
+	if fileName := strings.TrimSpace(recovery.TargetFileName); fileName != "" {
+		recovered.FileName = fileName
+	} else if recovered.FileName == "" {
+		recovered.FileName = recovered.ID
+	}
+	if recovery.TargetPath != "" {
+		if recovered.Attributes == nil {
+			recovered.Attributes = make(map[string]string)
+		}
+		recovered.Attributes["path"] = recovery.TargetPath
+	}
+
+	recovered.Provider = "codex"
+	recovered.Disabled = false
+	recovered.Unavailable = false
+	recovered.Status = coreauth.StatusActive
+	recovered.StatusMessage = ""
+	recovered.LastError = nil
+	recovered.NextRetryAfter = time.Time{}
+	recovered.NextRefreshAfter = time.Time{}
+	recovered.LastRefreshedAt = now
+	recovered.UpdatedAt = now
+	recovered.Quota = coreauth.QuotaState{}
+	recovered.ModelStates = nil
+	recovered.Metadata["disabled"] = false
+	delete(recovered.Metadata, "disabled_reason")
+	delete(recovered.Metadata, "disabledReason")
+	delete(recovered.Metadata, "status_message")
+	delete(recovered.Metadata, "statusMessage")
+	normalizeCodexAuthMetadata(recovered.Provider, recovered.Metadata)
+	syncRecoveredRoutingMetadata(recovered)
+
+	return h.saveAndActivateTokenRecord(ctx, recovered)
+}
+
+func mergeRecoveredCodexMetadata(dst, old map[string]any) {
+	if dst == nil || len(old) == 0 {
+		return
+	}
+	for key, value := range old {
+		if shouldSkipRecoveredCodexMetadataKey(key) {
+			continue
+		}
+		if _, exists := dst[key]; !exists {
+			dst[key] = value
+		}
+	}
+}
+
+func shouldSkipRecoveredCodexMetadataKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "", "type", "id_token", "idtoken", "access_token", "accesstoken", "refresh_token", "refreshtoken",
+		"token", "expired", "expire", "last_refresh", "lastrefresh", "email", "account_id", "accountid",
+		"chatgpt_account_id", "chatgptaccountid", "plan_type", "plantype", "disabled", "disabled_reason",
+		"disabledreason", "status", "status_message", "statusmessage", "last_error", "lasterror",
+		"next_retry_after", "nextretryafter", "next_refresh_after", "nextrefreshafter":
+		return true
+	default:
+		return false
+	}
+}
+
+func syncRecoveredRoutingMetadata(auth *coreauth.Auth) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	if label := strings.TrimSpace(auth.Label); label != "" {
+		auth.Metadata["label"] = label
+	}
+	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
+		auth.Metadata["prefix"] = prefix
+	}
+	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+		auth.Metadata["proxy_url"] = proxyURL
+	}
+	if proxyID := strings.TrimSpace(auth.ProxyID); proxyID != "" {
+		auth.Metadata["proxy_id"] = proxyID
+	}
+}
+
+func (h *Handler) saveAndActivateTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
+	if record == nil {
+		return "", fmt.Errorf("token record is nil")
+	}
+	if h == nil || h.authManager == nil {
+		return h.saveTokenRecord(ctx, record)
+	}
+	if h.postAuthHook != nil {
+		if err := h.postAuthHook(ctx, record); err != nil {
+			return "", fmt.Errorf("post-auth hook failed: %w", err)
+		}
+	}
+
+	var saved *coreauth.Auth
+	var err error
+	if existing, ok := h.authManager.GetByID(record.ID); ok && existing != nil {
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = existing.CreatedAt
+		}
+		saved, err = h.authManager.Update(ctx, record)
+	} else {
+		saved, err = h.authManager.Register(ctx, record)
+	}
+	if err != nil {
+		return "", err
+	}
+	if path := strings.TrimSpace(authAttribute(saved, "path")); path != "" {
+		return path, nil
+	}
+	if path := strings.TrimSpace(authAttribute(record, "path")); path != "" {
+		return path, nil
+	}
+	if saved != nil {
+		if fileName := strings.TrimSpace(saved.FileName); fileName != "" {
+			return fileName, nil
+		}
+		return saved.ID, nil
+	}
+	return record.ID, nil
+}
+
+func (h *Handler) RequestCodexToken(c *gin.Context) {
+	ctx := detachedAuthContext(c)
+
+	fmt.Println("Initializing Codex authentication...")
+	result, err := h.startCodexOAuthFlow(ctx, codexOAuthStartOptions{
+		UseCallbackForwarder: isWebUIRequest(c),
+	})
+	if err != nil {
+		log.Errorf("Failed to initialize Codex authentication: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"status": "ok", "url": result.URL, "state": result.State})
 }
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {

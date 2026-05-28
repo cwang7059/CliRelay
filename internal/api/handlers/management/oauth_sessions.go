@@ -28,6 +28,24 @@ type oauthSession struct {
 	Status    string
 	CreatedAt time.Time
 	ExpiresAt time.Time
+	Recovery  *oauthRecoveryContext
+}
+
+type oauthRecoveryContext struct {
+	TargetID        string
+	TargetName      string
+	TargetFileName  string
+	TargetPath      string
+	TargetEmail     string
+	TargetAccountID string
+}
+
+func (r *oauthRecoveryContext) Clone() *oauthRecoveryContext {
+	if r == nil {
+		return nil
+	}
+	cp := *r
+	return &cp
 }
 
 type oauthSessionStore struct {
@@ -55,6 +73,10 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 }
 
 func (s *oauthSessionStore) Register(state, provider string) {
+	s.RegisterWithRecovery(state, provider, nil)
+}
+
+func (s *oauthSessionStore) RegisterWithRecovery(state, provider string, recovery *oauthRecoveryContext) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
@@ -71,6 +93,7 @@ func (s *oauthSessionStore) Register(state, provider string) {
 		Status:    "",
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
+		Recovery:  recovery.Clone(),
 	}
 }
 
@@ -154,6 +177,14 @@ func (s *oauthSessionStore) Get(state string) (oauthSession, bool) {
 	return session, ok
 }
 
+func (s *oauthSessionStore) Recovery(state string) (*oauthRecoveryContext, bool) {
+	session, ok := s.Get(state)
+	if !ok || session.Recovery == nil {
+		return nil, false
+	}
+	return session.Recovery.Clone(), true
+}
+
 func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -180,6 +211,10 @@ var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
 
+func RegisterOAuthSessionRecovery(state, provider string, recovery *oauthRecoveryContext) {
+	oauthSessions.RegisterWithRecovery(state, provider, recovery)
+}
+
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
@@ -194,6 +229,10 @@ func GetOAuthSession(state string) (provider string, status string, ok bool) {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
+}
+
+func GetOAuthSessionRecovery(state string) (*oauthRecoveryContext, bool) {
+	return oauthSessions.Recovery(state)
 }
 
 func IsOAuthSessionPending(state, provider string) bool {

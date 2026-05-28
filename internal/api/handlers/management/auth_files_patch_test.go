@@ -42,6 +42,130 @@ func (s *failingAuthStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+func TestIsCodex401RecoverableAllowsDisabledCodexOAuth(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "codex-disabled.json",
+		FileName: "codex-disabled.json",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{
+			"email": "recover@example.com",
+		},
+	}
+
+	if !isCodex401Recoverable(auth) {
+		t.Fatal("expected disabled Codex OAuth auth to be recoverable")
+	}
+
+	auth.Provider = "claude"
+	if isCodex401Recoverable(auth) {
+		t.Fatal("expected non-Codex auth to be non-recoverable")
+	}
+}
+
+func TestSaveRecoveredCodexAuthOverwritesTargetAndReactivates(t *testing.T) {
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	ctx := context.Background()
+	_, err := manager.Register(ctx, &coreauth.Auth{
+		ID:       "codex-old.json",
+		FileName: "codex-old.json",
+		Provider: "codex",
+		Label:    "Old Label",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{
+			"email":           "recover@example.com",
+			"account_id":      "account-1",
+			"disabled":        true,
+			"disabled_reason": "401_unauthorized",
+			"label":           "Old Label",
+			"custom_tags":     []string{"keep"},
+		},
+		LastError: &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+	})
+	if err != nil {
+		t.Fatalf("register target auth: %v", err)
+	}
+
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: manager,
+	}
+	path, err := h.saveRecoveredCodexAuth(ctx, &oauthRecoveryContext{
+		TargetID:        "codex-old.json",
+		TargetName:      "codex-old.json",
+		TargetFileName:  "codex-old.json",
+		TargetEmail:     "recover@example.com",
+		TargetAccountID: "account-1",
+	}, &coreauth.Auth{
+		ID:       "codex-new.json",
+		FileName: "codex-new.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":      "recover@example.com",
+			"account_id": "account-1",
+			"plan_type":  "plus",
+		},
+	})
+	if err != nil {
+		t.Fatalf("save recovered auth: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected saved path or id")
+	}
+
+	updated, ok := manager.GetByID("codex-old.json")
+	if !ok || updated == nil {
+		t.Fatal("expected target auth to remain under original id")
+	}
+	if updated.Disabled || updated.Status != coreauth.StatusActive {
+		t.Fatalf("expected recovered auth active, got disabled=%v status=%q", updated.Disabled, updated.Status)
+	}
+	if updated.FileName != "codex-old.json" {
+		t.Fatalf("filename = %q, want original filename", updated.FileName)
+	}
+	if updated.LastError != nil {
+		t.Fatalf("expected LastError cleared, got %#v", updated.LastError)
+	}
+	if disabled, _ := updated.Metadata["disabled"].(bool); disabled {
+		t.Fatal("metadata disabled should be false")
+	}
+	if _, ok := updated.Metadata["disabled_reason"]; ok {
+		t.Fatal("disabled_reason should be removed")
+	}
+	if updated.Metadata["label"] != "Old Label" {
+		t.Fatalf("label metadata = %#v, want Old Label", updated.Metadata["label"])
+	}
+	if updated.Metadata["plan_type"] != "plus" {
+		t.Fatalf("plan_type = %#v, want plus", updated.Metadata["plan_type"])
+	}
+}
+
+func TestSaveRecoveredCodexAuthRejectsEmailMismatch(t *testing.T) {
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: manager,
+	}
+
+	_, err := h.saveRecoveredCodexAuth(context.Background(), &oauthRecoveryContext{
+		TargetID:    "codex-old.json",
+		TargetEmail: "expected@example.com",
+	}, &coreauth.Auth{
+		ID:       "codex-new.json",
+		FileName: "codex-new.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email": "other@example.com",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected email mismatch error")
+	}
+}
+
 func TestPatchAuthFileFieldsUpdatesOAuthChannelLabel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -397,9 +521,9 @@ func TestBuildAuthFileEntryBackfillsCodexAccountIDFromDefaultOrganization(t *tes
 			"organizations": []any{
 				map[string]any{
 					"id":         "org-default",
-					"is_default":  true,
-					"role":        "owner",
-					"title":       "Personal",
+					"is_default": true,
+					"role":       "owner",
+					"title":      "Personal",
 				},
 			},
 			"user_id": "user-abc123",
