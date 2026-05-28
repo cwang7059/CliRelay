@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CliRelay OAuth Auto</title>
+    <link rel="stylesheet" href="launcher.css">
+  </head>
+  <body>
+    <main class="workspace">
+      <section class="panel">
+        <header>
+          <div>
+            <p class="eyebrow">CliRelay OAuth</p>
+            <h1 id="title">自动启动中</h1>
+          </div>
+          <span id="badge" class="badge waiting">WAIT</span>
+        </header>
+
+        <div class="meter">
+          <span id="stepApi" class="dot active"></span>
+          <span id="stepStart" class="dot"></span>
+          <span id="stepAuth" class="dot"></span>
+          <span id="stepDone" class="dot"></span>
+        </div>
+
+        <p id="message" class="message">正在连接 CliRelay 管理接口...</p>
+
+        <dl class="facts">
+          <div>
+            <dt>提供商</dt>
+            <dd id="providerValue">-</dd>
+          </div>
+          <div>
+            <dt>State</dt>
+            <dd id="stateValue">-</dd>
+          </div>
+          <div>
+            <dt>回调</dt>
+            <dd id="callbackValue">等待中</dd>
+          </div>
+        </dl>
+
+        <div class="manual">
+          <textarea id="callbackInput" rows="3" spellcheck="false" placeholder="如果没有自动捕获，把 localhost 回调地址粘贴到这里"></textarea>
+          <button id="submitCallbackBtn" type="button">提交回调</button>
+        </div>
+
+        <div class="actions">
+          <button id="restartBtn" type="button" class="primary">重新开始</button>
+          <button id="openAuthBtn" type="button">打开授权页</button>
+          <button id="clearBtn" type="button">清空状态</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="launcher.js"></script>
+  </body>
+</html>

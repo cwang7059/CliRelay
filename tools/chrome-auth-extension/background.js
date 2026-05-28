@@ -1,6 +1,7 @@
 const SETTINGS_KEY = "clirelayOAuthSettings";
 const SESSION_KEY = "clirelayOAuthSession";
 const POLL_ALARM = "clirelay-oauth-poll";
+const LAUNCHER_PATH = "launcher.html";
 
 const DEFAULT_SETTINGS = {
   apiBase: "http://127.0.0.1:8317/v0/management",
@@ -60,6 +61,21 @@ function normalizeSettings(settings = {}) {
 
 function getErrorMessage(error) {
   return normalizeString(error?.message) || String(error || "未知错误");
+}
+
+async function ensureLauncherTab() {
+  const launcherUrl = chrome.runtime.getURL(`${LAUNCHER_PATH}?autostart=1`);
+  const launcherPattern = chrome.runtime.getURL(`${LAUNCHER_PATH}*`);
+  const tabs = await chrome.tabs.query({ url: launcherPattern }).catch(() => []);
+  const existingTab = tabs.find((tab) => tab?.id);
+  if (existingTab?.id) {
+    await chrome.tabs.update(existingTab.id, { active: true }).catch(() => {});
+    if (existingTab.windowId) {
+      await chrome.windows.update(existingTab.windowId, { focused: true }).catch(() => {});
+    }
+    return existingTab;
+  }
+  return chrome.tabs.create({ url: launcherUrl, active: true });
 }
 
 async function getStoredSettings() {
@@ -368,7 +384,16 @@ async function maybeCaptureCallback(rawUrl, tabId) {
 chrome.runtime.onInstalled.addListener(async () => {
   await setStoredSettings(await getStoredSettings());
   await updateBadge(await getSession());
+  await ensureLauncherTab().catch(() => {});
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureLauncherTab().catch(() => {});
+});
+
+setTimeout(() => {
+  ensureLauncherTab().catch(() => {});
+}, 800);
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM) {
