@@ -2527,10 +2527,9 @@ func (h *Handler) RecoverCodex401AuthFile(c *gin.Context) {
 	}
 
 	result, err := h.startCodexOAuthFlow(detachedAuthContext(c), codexOAuthStartOptions{
-		Recovery:                 recovery,
-		UseCallbackForwarder:     true,
-		RequireCallbackForwarder: true,
-		OpenBrowser:              openBrowser,
+		Recovery:             recovery,
+		UseCallbackForwarder: true,
+		OpenBrowser:          openBrowser,
 	})
 	if err != nil {
 		log.Errorf("Failed to start Codex recovery: %v", err)
