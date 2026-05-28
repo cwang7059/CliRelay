@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "CliRelay OAuth Helper",
+  "version": "0.1.0",
+  "description": "Start CliRelay OAuth login flows and submit localhost callbacks automatically.",
+  "permissions": [
+    "alarms",
+    "storage",
+    "tabs",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://auth.openai.com/*",
+    "https://auth0.openai.com/*",
+    "https://accounts.openai.com/*",
+    "https://accounts.google.com/*",
+    "https://*.google.com/*",
+    "https://*.anthropic.com/*",
+    "https://claude.ai/*",
+    "https://chat.qwen.ai/*",
+    "https://kimi.moonshot.cn/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "CliRelay OAuth",
+    "default_popup": "popup.html"
+  }
+}

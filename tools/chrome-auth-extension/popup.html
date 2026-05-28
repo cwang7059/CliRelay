@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CliRelay OAuth</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>CliRelay OAuth</h1>
+          <p id="statusText">读取状态中...</p>
+        </div>
+        <span id="statusPill" class="pill neutral">Idle</span>
+      </header>
+
+      <section class="section">
+        <label>
+          <span>管理接口</span>
+          <input id="apiBase" autocomplete="off" spellcheck="false">
+        </label>
+        <label>
+          <span>管理密钥</span>
+          <input id="managementKey" type="password" autocomplete="current-password" spellcheck="false">
+        </label>
+        <div class="grid">
+          <label>
+            <span>提供商</span>
+            <select id="provider">
+              <option value="codex">Codex</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="antigravity">Antigravity</option>
+              <option value="gemini-cli">Gemini CLI</option>
+              <option value="qwen">Qwen</option>
+              <option value="kimi">Kimi</option>
+            </select>
+          </label>
+          <label>
+            <span>代理 ID</span>
+            <input id="proxyId" autocomplete="off" spellcheck="false" placeholder="可选">
+          </label>
+        </div>
+        <label id="projectIdRow" class="hidden">
+          <span>Project ID</span>
+          <input id="projectId" autocomplete="off" spellcheck="false" placeholder="Gemini CLI 可选">
+        </label>
+        <label class="checkline">
+          <input id="autoCloseCallbackTab" type="checkbox">
+          <span>提交后关闭回调页</span>
+        </label>
+      </section>
+
+      <section class="section actions">
+        <button id="saveBtn" type="button" class="secondary">保存</button>
+        <button id="testBtn" type="button" class="secondary">测试连接</button>
+        <button id="startBtn" type="button" class="primary">启动 OAuth</button>
+      </section>
+
+      <section id="sessionPanel" class="section hidden">
+        <div class="rowline">
+          <span>State</span>
+          <code id="stateValue">-</code>
+        </div>
+        <div class="rowline">
+          <span>授权链接</span>
+          <button id="copyUrlBtn" type="button" class="linkbtn">复制</button>
+        </div>
+        <a id="authUrl" class="authlink" href="#" target="_blank" rel="noreferrer">打开授权页</a>
+        <div class="actions compact">
+          <button id="pollBtn" type="button" class="secondary">刷新状态</button>
+          <button id="clearBtn" type="button" class="secondary danger">清空会话</button>
+        </div>
+      </section>
+
+      <section class="section">
+        <label>
+          <span>手动回调</span>
+          <textarea id="callbackUrl" rows="3" spellcheck="false" placeholder="http://localhost:1455/auth/callback?code=...&state=..."></textarea>
+        </label>
+        <button id="submitCallbackBtn" type="button" class="secondary full">提交回调</button>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
