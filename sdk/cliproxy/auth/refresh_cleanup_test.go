@@ -131,20 +131,68 @@ func TestRefreshAuth_PermanentError_PreservesCredentialWhenConfigured(t *testing
 	if !ok {
 		t.Fatal("expected auth to be preserved in memory after permanent error")
 	}
-	if current.Status != StatusError || !current.Unavailable {
-		t.Fatalf("expected preserved auth to be unavailable with error status, got status=%q unavailable=%v", current.Status, current.Unavailable)
+	if current.Status != StatusDisabled || !current.Disabled {
+		t.Fatalf("expected preserved auth to be disabled, got status=%q disabled=%v", current.Status, current.Disabled)
 	}
 	if current.LastError == nil || current.LastError.HTTPStatus != http.StatusUnauthorized {
 		t.Fatalf("expected unauthorized LastError, got %#v", current.LastError)
 	}
-	if current.NextRefreshAfter.IsZero() || current.NextRetryAfter.IsZero() {
-		t.Fatal("expected retry and refresh backoff to be set")
+	if !current.NextRefreshAfter.IsZero() || !current.NextRetryAfter.IsZero() {
+		t.Fatal("expected disabled auth to skip retry and refresh backoff")
 	}
 	if got := store.deleteCount.Load(); got != 0 {
 		t.Fatalf("expected 0 Delete calls, got %d", got)
 	}
 	if got := store.saveCount.Load(); got != 1 {
 		t.Fatalf("expected 1 Save call for preserved state, got %d", got)
+	}
+}
+
+func TestMarkResult_UnauthorizedDisablesCredential(t *testing.T) {
+	store := &trackingStore{}
+	mgr := NewManager(store, nil, nil)
+
+	auth := &Auth{
+		ID:       "test-auth-401",
+		Provider: "test-provider",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "codex"},
+	}
+
+	ctx := WithSkipPersist(context.Background())
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-5.5",
+		Success:  false,
+		Error:    &Error{Message: "unauthorized", HTTPStatus: http.StatusUnauthorized},
+	})
+
+	current, ok := mgr.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("expected auth to remain after unauthorized result")
+	}
+	if !current.Disabled || current.Status != StatusDisabled {
+		t.Fatalf("expected auth disabled after 401, got disabled=%v status=%q", current.Disabled, current.Status)
+	}
+	if current.StatusMessage != "disabled after 401 unauthorized" {
+		t.Fatalf("status message = %q", current.StatusMessage)
+	}
+	if current.LastError == nil || current.LastError.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized LastError, got %#v", current.LastError)
+	}
+	if state := current.ModelStates["gpt-5.5"]; state == nil || state.Status != StatusDisabled {
+		t.Fatalf("expected model state disabled, got %#v", state)
+	}
+	if got := store.deleteCount.Load(); got != 0 {
+		t.Fatalf("expected 0 Delete calls, got %d", got)
+	}
+	if got := store.saveCount.Load(); got != 1 {
+		t.Fatalf("expected 1 Save call for disabled state, got %d", got)
 	}
 }
 

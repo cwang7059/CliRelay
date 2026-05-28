@@ -1486,8 +1486,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
 				case 401:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
+					disableAuthAfterUnauthorized(auth, result.Error, now)
+					state.Status = StatusDisabled
+					state.StatusMessage = auth.StatusMessage
+					state.NextRetryAfter = time.Time{}
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
 				case 402, 403:
@@ -1533,7 +1535,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.NextRetryAfter = time.Time{}
 				}
 
-				auth.Status = StatusError
+				if !auth.Disabled && auth.Status != StatusDisabled {
+					auth.Status = StatusError
+				}
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
@@ -1842,8 +1846,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {
 	case 401:
-		auth.StatusMessage = "unauthorized"
-		auth.NextRetryAfter = now.Add(30 * time.Minute)
+		disableAuthAfterUnauthorized(auth, resultErr, now)
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
@@ -1877,6 +1880,27 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
+	}
+}
+
+func disableAuthAfterUnauthorized(auth *Auth, resultErr *Error, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.Disabled = true
+	auth.Unavailable = true
+	auth.Status = StatusDisabled
+	auth.StatusMessage = "disabled after 401 unauthorized"
+	auth.NextRetryAfter = time.Time{}
+	auth.NextRefreshAfter = time.Time{}
+	auth.UpdatedAt = now
+	if resultErr != nil {
+		auth.LastError = cloneError(resultErr)
+	} else if auth.LastError == nil {
+		auth.LastError = &Error{Message: "unauthorized", HTTPStatus: http.StatusUnauthorized}
+	}
+	if auth.LastError != nil && auth.LastError.HTTPStatus == 0 {
+		auth.LastError.HTTPStatus = http.StatusUnauthorized
 	}
 }
 
@@ -2298,6 +2322,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
+	if a.Disabled || a.Status == StatusDisabled {
+		return false
+	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
 	}
@@ -2544,13 +2571,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 				log.Warnf("permanent refresh failure for %s (%s): %v; preserving credential file", auth.ID, auth.Provider, err)
 				m.mu.Lock()
 				if current := m.auths[id]; current != nil {
-					current.Unavailable = true
-					current.Status = StatusError
-					current.StatusMessage = "unauthorized"
-					current.NextRetryAfter = now.Add(24 * time.Hour)
-					current.NextRefreshAfter = now.Add(24 * time.Hour)
-					current.LastError = &Error{Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
-					current.UpdatedAt = now
+					disableAuthAfterUnauthorized(current, &Error{Message: err.Error(), HTTPStatus: http.StatusUnauthorized}, now)
 					m.auths[id] = current
 				}
 				m.mu.Unlock()
