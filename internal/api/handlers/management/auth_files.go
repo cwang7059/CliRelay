@@ -2475,11 +2475,28 @@ func (h *Handler) startCodexOAuthFlow(ctx context.Context, opts codexOAuthStartO
 		State: state,
 	}
 	if opts.OpenBrowser {
-		if errOpen := browser.OpenURL(authURL); errOpen != nil {
-			result.OpenError = errOpen.Error()
-			log.WithError(errOpen).Warn("failed to open browser for codex oauth recovery")
+		var helperErr error
+		if opts.Recovery != nil {
+			helperErr = h.openCodexRecoveryBrowser(authURL)
+			if helperErr == nil {
+				result.Opened = true
+			} else {
+				log.WithError(helperErr).Warn("failed to open codex recovery with chrome helper; falling back to default browser")
+			}
+		}
+		if !result.Opened {
+			if errOpen := browser.OpenURL(authURL); errOpen != nil {
+				if helperErr != nil {
+					result.OpenError = fmt.Sprintf("%v; fallback browser: %v", helperErr, errOpen)
+				} else {
+					result.OpenError = errOpen.Error()
+				}
+				log.WithError(errOpen).Warn("failed to open browser for codex oauth recovery")
+			} else {
+				result.Opened = true
+			}
 		} else {
-			result.Opened = true
+			log.Debug("opened codex recovery with chrome auth helper")
 		}
 	}
 
