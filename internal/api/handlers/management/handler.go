@@ -34,30 +34,36 @@ const attemptCleanupInterval = 1 * time.Hour
 // attemptMaxIdleTime controls how long an IP can be idle before cleanup
 const attemptMaxIdleTime = 2 * time.Hour
 
+const autoCodex401RecoveryCooldown = 10 * time.Minute
+
+const autoCodex401RecoveryGlobalKey = "__global_codex_401_recovery__"
+
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	onConfigMutated     func(*config.Config)
-	startTime           time.Time
-	attemptCleanupStop  chan struct{}
-	attemptCleanupOnce  sync.Once
-	accessManager       *sdkaccess.Manager
-	trendCacheMu        sync.Mutex
-	trendCache          map[string]trendCacheEntry
-	imageTasksMu        sync.Mutex
-	imageTasks          map[string]*imageGenerationTask
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.Mutex
+	attemptsMu           sync.Mutex
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	usageStats           *usage.RequestStatistics
+	tokenStore           coreauth.Store
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
+	postAuthHook         coreauth.PostAuthHook
+	onConfigMutated      func(*config.Config)
+	startTime            time.Time
+	attemptCleanupStop   chan struct{}
+	attemptCleanupOnce   sync.Once
+	accessManager        *sdkaccess.Manager
+	trendCacheMu         sync.Mutex
+	trendCache           map[string]trendCacheEntry
+	imageTasksMu         sync.Mutex
+	imageTasks           map[string]*imageGenerationTask
+	autoRecoveryMu       sync.Mutex
+	autoRecoveryInFlight map[string]time.Time
 }
 
 type trendCacheEntry struct {
@@ -71,18 +77,19 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret = strings.TrimSpace(envSecret)
 
 	h := &Handler{
-		cfg:                 cfg,
-		configFilePath:      configFilePath,
-		failedAttempts:      make(map[string]*attemptInfo),
-		authManager:         manager,
-		usageStats:          usage.GetRequestStatistics(),
-		tokenStore:          sdkAuth.GetTokenStore(),
-		allowRemoteOverride: envSecret != "",
-		envSecret:           envSecret,
-		startTime:           time.Now(),
-		attemptCleanupStop:  make(chan struct{}),
-		trendCache:          make(map[string]trendCacheEntry),
-		imageTasks:          make(map[string]*imageGenerationTask),
+		cfg:                  cfg,
+		configFilePath:       configFilePath,
+		failedAttempts:       make(map[string]*attemptInfo),
+		authManager:          manager,
+		usageStats:           usage.GetRequestStatistics(),
+		tokenStore:           sdkAuth.GetTokenStore(),
+		allowRemoteOverride:  envSecret != "",
+		envSecret:            envSecret,
+		startTime:            time.Now(),
+		attemptCleanupStop:   make(chan struct{}),
+		trendCache:           make(map[string]trendCacheEntry),
+		imageTasks:           make(map[string]*imageGenerationTask),
+		autoRecoveryInFlight: make(map[string]time.Time),
 	}
 	h.startAttemptCleanup()
 	return h

@@ -37,6 +37,7 @@ type oauthRecoveryContext struct {
 	TargetFileName  string
 	TargetPath      string
 	TargetEmail     string
+	TargetPassword  string
 	TargetAccountID string
 }
 

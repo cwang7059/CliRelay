@@ -1166,8 +1166,8 @@ func authEmail(auth *coreauth.Auth) string {
 		return ""
 	}
 	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["email"].(string); ok {
-			return strings.TrimSpace(v)
+		if v := metadataString(auth.Metadata, "email", "login_identity", "account_email", "accountEmail"); v != "" {
+			return v
 		}
 	}
 	if auth.Attributes != nil {
@@ -1176,6 +1176,25 @@ func authEmail(auth *coreauth.Auth) string {
 		}
 		if v := strings.TrimSpace(auth.Attributes["account_email"]); v != "" {
 			return v
+		}
+	}
+	return ""
+}
+
+func authPassword(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if v := metadataString(auth.Metadata, "password", "login_password", "loginPassword", "account_password", "accountPassword"); v != "" {
+			return v
+		}
+	}
+	if auth.Attributes != nil {
+		for _, key := range []string{"password", "login_password", "loginPassword", "account_password", "accountPassword"} {
+			if v := strings.TrimSpace(auth.Attributes[key]); v != "" {
+				return v
+			}
 		}
 	}
 	return ""
@@ -2623,6 +2642,60 @@ func (h *Handler) RecoverCodex401AuthFile(c *gin.Context) {
 	c.JSON(http.StatusOK, payload)
 }
 
+func (h *Handler) GetCodex401RecoveryCredentials(c *gin.Context) {
+	state := strings.TrimSpace(c.Query("state"))
+	if state == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "state is required"})
+		return
+	}
+	if err := ValidateOAuthState(state); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid state"})
+		return
+	}
+	recovery, ok := GetOAuthSessionRecovery(state)
+	if !ok || recovery == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "recovery session not found"})
+		return
+	}
+	if provider, _, exists := GetOAuthSession(state); exists && provider != "" && !strings.EqualFold(provider, "codex") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "state is not a codex recovery session"})
+		return
+	}
+	if !IsOAuthSessionPending(state, "codex") {
+		c.JSON(http.StatusConflict, gin.H{"error": "recovery session is not pending"})
+		return
+	}
+
+	email := strings.TrimSpace(recovery.TargetEmail)
+	password := strings.TrimSpace(recovery.TargetPassword)
+	if (email == "" || password == "") && h != nil && h.authManager != nil && strings.TrimSpace(recovery.TargetID) != "" {
+		if auth, found := h.authManager.GetByID(recovery.TargetID); found && auth != nil {
+			if email == "" {
+				email = strings.TrimSpace(authEmail(auth))
+			}
+			if password == "" {
+				password = strings.TrimSpace(authPassword(auth))
+			}
+		}
+	}
+	if email == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "recovery account email not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"email":        email,
+		"password":     password,
+		"has_password": password != "",
+		"target": gin.H{
+			"id":         recovery.TargetID,
+			"name":       recovery.TargetName,
+			"email":      email,
+			"account_id": recovery.TargetAccountID,
+		},
+	})
+}
+
 func (h *Handler) findCodexRecoveryTarget(name string) (*coreauth.Auth, error) {
 	if h == nil || h.authManager == nil {
 		return nil, nil
@@ -2708,6 +2781,7 @@ func recoveryContextFromAuth(auth *coreauth.Auth) *oauthRecoveryContext {
 		TargetFileName:  fileName,
 		TargetPath:      path,
 		TargetEmail:     strings.ToLower(strings.TrimSpace(authEmail(auth))),
+		TargetPassword:  authPassword(auth),
 		TargetAccountID: strings.TrimSpace(codexAccountIDFromMetadata(auth.Metadata)),
 	}
 }
@@ -2722,6 +2796,7 @@ func (h *Handler) saveRecoveredCodexAuth(ctx context.Context, recovery *oauthRec
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}
+	defer h.finishAutoCodex401Recovery(recovery.TargetID)
 
 	recordEmail := strings.ToLower(strings.TrimSpace(authEmail(record)))
 	if recordEmail == "" && record.Metadata != nil {

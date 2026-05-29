@@ -140,6 +140,11 @@ type Hook interface {
 	OnResult(ctx context.Context, result Result)
 }
 
+// UnauthorizedAuthHandler receives a snapshot after an auth is disabled by a
+// 401/permanent-auth failure. It must be non-blocking from the manager's point
+// of view; Manager invokes it outside the auth lock.
+type UnauthorizedAuthHandler func(ctx context.Context, auth *Auth, result Result)
+
 // NoopHook provides optional hook defaults.
 type NoopHook struct{}
 
@@ -160,6 +165,7 @@ type Manager struct {
 	roundRobinSelector *RoundRobinSelector
 	fillFirstSelector  *FillFirstSelector
 	hook               Hook
+	unauthorizedHook   UnauthorizedAuthHandler
 	mu                 sync.RWMutex
 	auths              map[string]*Auth
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
@@ -247,6 +253,36 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.fillFirstSelector = &FillFirstSelector{}
 	}
 	m.mu.Unlock()
+}
+
+// SetUnauthorizedAuthHandler registers a callback for auths disabled after a
+// 401/permanent-auth failure. Passing nil disables the callback.
+func (m *Manager) SetUnauthorizedAuthHandler(handler UnauthorizedAuthHandler) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.unauthorizedHook = handler
+	m.mu.Unlock()
+}
+
+func (m *Manager) emitUnauthorizedAuth(ctx context.Context, auth *Auth, result Result) {
+	if m == nil || auth == nil {
+		return
+	}
+	m.mu.RLock()
+	handler := m.unauthorizedHook
+	m.mu.RUnlock()
+	if handler == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshot := auth.Clone()
+	resultCopy := result
+	resultCopy.Error = cloneError(result.Error)
+	go handler(context.WithoutCancel(ctx), snapshot, resultCopy)
 }
 
 func (m *Manager) selectorForRoutingScopeLocked(cfg *internalconfig.Config, routeGroup string, allowedGroups map[string]struct{}) Selector {
@@ -1449,10 +1485,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	var unauthorizedAuth *Auth
+	unauthorizedResult := result
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		if unauthorizedResult.Provider == "" {
+			unauthorizedResult.Provider = auth.Provider
+		}
 
 		if result.Success {
 			if result.Model != "" {
@@ -1540,14 +1581,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
+				if statusCode == http.StatusUnauthorized {
+					unauthorizedAuth = auth.Clone()
+				}
 			} else {
+				statusCode := statusCodeFromResult(result.Error)
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				if statusCode == http.StatusUnauthorized {
+					unauthorizedAuth = auth.Clone()
+				}
 			}
 		}
 
 		_ = m.persist(ctx, auth)
 	}
 	m.mu.Unlock()
+
+	if unauthorizedAuth != nil {
+		m.emitUnauthorizedAuth(ctx, unauthorizedAuth, unauthorizedResult)
+	}
 
 	if clearModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
@@ -2574,16 +2626,29 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		if IsPermanentAuthError(err) {
 			if m.preserveInvalidAuthFiles.Load() {
 				log.Warnf("permanent refresh failure for %s (%s): %v; preserving credential file", auth.ID, auth.Provider, err)
+				resultErr := &Error{Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				var unauthorizedAuth *Auth
 				m.mu.Lock()
 				if current := m.auths[id]; current != nil {
-					disableAuthAfterUnauthorized(current, &Error{Message: err.Error(), HTTPStatus: http.StatusUnauthorized}, now)
+					disableAuthAfterUnauthorized(current, resultErr, now)
 					m.auths[id] = current
+					unauthorizedAuth = current.Clone()
 				}
 				m.mu.Unlock()
 				if current, ok := m.GetByID(id); ok && current != nil {
-					if _, updateErr := m.Update(ctx, current); updateErr != nil {
+					if saved, updateErr := m.Update(ctx, current); updateErr != nil {
 						log.Errorf("failed to persist preserved invalid auth %s: %v", id, updateErr)
+					} else if saved != nil {
+						unauthorizedAuth = saved.Clone()
 					}
+				}
+				if unauthorizedAuth != nil {
+					m.emitUnauthorizedAuth(ctx, unauthorizedAuth, Result{
+						AuthID:   unauthorizedAuth.ID,
+						Provider: unauthorizedAuth.Provider,
+						Success:  false,
+						Error:    resultErr,
+					})
 				}
 				return
 			}

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -61,6 +63,98 @@ func TestIsCodex401RecoverableAllowsDisabledCodexOAuth(t *testing.T) {
 	auth.Provider = "claude"
 	if isCodex401Recoverable(auth) {
 		t.Fatal("expected non-Codex auth to be non-recoverable")
+	}
+}
+
+func TestRecoveryContextFromAuthIncludesLoginIdentityAndPassword(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "codex-disabled.json",
+		FileName: "codex-disabled.json",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{
+			"login_identity": "recover@example.com",
+			"password":       "secret-password",
+		},
+	}
+
+	recovery := recoveryContextFromAuth(auth)
+	if recovery == nil {
+		t.Fatal("expected recovery context")
+	}
+	if recovery.TargetEmail != "recover@example.com" {
+		t.Fatalf("TargetEmail = %q", recovery.TargetEmail)
+	}
+	if recovery.TargetPassword != "secret-password" {
+		t.Fatalf("TargetPassword = %q", recovery.TargetPassword)
+	}
+}
+
+func TestGetCodex401RecoveryCredentialsReturnsSessionAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldSessions := oauthSessions
+	oauthSessions = newOAuthSessionStore(oauthSessionTTL)
+	t.Cleanup(func() { oauthSessions = oldSessions })
+
+	RegisterOAuthSessionRecovery("state-credentials", "codex", &oauthRecoveryContext{
+		TargetID:       "codex-old.json",
+		TargetName:     "codex-old.json",
+		TargetEmail:    "recover@example.com",
+		TargetPassword: "secret-password",
+	})
+	h := NewHandler(&config.Config{}, "", nil)
+	t.Cleanup(h.Close)
+
+	req := httptest.NewRequest(http.MethodGet, "/credentials?state=state-credentials", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.GetCodex401RecoveryCredentials(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+		HasPassword bool   `json:"has_password"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Email != "recover@example.com" || payload.Password != "secret-password" || !payload.HasPassword {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAutoRecoverCodex401ConfigEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auto-recover-codex-401: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, configPath, nil)
+	t.Cleanup(h.Close)
+
+	body, err := json.Marshal(map[string]any{"value": false})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/auto-recover-codex-401", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.PutAutoRecoverCodex401(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if h.cfg.AutoRecoverCodex401 {
+		t.Fatal("expected auto recover setting to be disabled")
 	}
 }
 
@@ -207,6 +301,52 @@ func TestSaveRecoveredCodexAuthRejectsEmailMismatch(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected email mismatch error")
+	}
+}
+
+func TestBeginAutoCodex401RecoveryDeduplicatesAndExpires(t *testing.T) {
+	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, "", nil)
+	t.Cleanup(h.Close)
+
+	if !h.beginAutoCodex401Recovery("codex-old.json") {
+		t.Fatal("expected first recovery attempt to start")
+	}
+	if h.beginAutoCodex401Recovery("codex-old.json") {
+		t.Fatal("expected duplicate recovery attempt to be suppressed")
+	}
+
+	h.autoRecoveryMu.Lock()
+	h.autoRecoveryInFlight["codex-old.json"] = time.Now().Add(-autoCodex401RecoveryCooldown - time.Second)
+	h.autoRecoveryInFlight[autoCodex401RecoveryGlobalKey] = time.Now().Add(-autoCodex401RecoveryCooldown - time.Second)
+	h.autoRecoveryMu.Unlock()
+
+	if !h.beginAutoCodex401Recovery("codex-old.json") {
+		t.Fatal("expected expired recovery attempt to start again")
+	}
+}
+
+func TestFinishAutoCodex401RecoveryClearsInFlight(t *testing.T) {
+	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, "", nil)
+	t.Cleanup(h.Close)
+
+	if !h.beginAutoCodex401Recovery("codex-old.json") {
+		t.Fatal("expected first recovery attempt to start")
+	}
+	h.finishAutoCodex401Recovery("codex-old.json")
+	if !h.beginAutoCodex401Recovery("codex-old.json") {
+		t.Fatal("expected recovery attempt after finish to start")
+	}
+}
+
+func TestBeginAutoCodex401RecoverySuppressesConcurrentDifferentAuth(t *testing.T) {
+	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, "", nil)
+	t.Cleanup(h.Close)
+
+	if !h.beginAutoCodex401Recovery("codex-a.json") {
+		t.Fatal("expected first recovery attempt to start")
+	}
+	if h.beginAutoCodex401Recovery("codex-b.json") {
+		t.Fatal("expected concurrent recovery for different auth to be suppressed")
 	}
 }
 

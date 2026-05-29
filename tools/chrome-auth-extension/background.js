@@ -1,5 +1,6 @@
 const SETTINGS_KEY = "clirelayOAuthSettings";
 const SESSION_KEY = "clirelayOAuthSession";
+const CREDENTIALS_CACHE_KEY = "clirelayOAuthRecoveryCredentials";
 const POLL_ALARM = "clirelay-oauth-poll";
 const LAUNCHER_PATH = "launcher.html";
 
@@ -9,7 +10,8 @@ const DEFAULT_SETTINGS = {
   provider: "codex",
   projectId: "",
   proxyId: "",
-  autoCloseCallbackTab: true
+  autoCloseCallbackTab: true,
+  autoFillRecoveryCredentials: true
 };
 
 const WEBUI_PROVIDERS = new Set(["codex", "anthropic", "antigravity", "gemini-cli"]);
@@ -55,7 +57,8 @@ function normalizeSettings(settings = {}) {
     provider: normalizeProvider(settings.provider),
     projectId: normalizeString(settings.projectId),
     proxyId: normalizeString(settings.proxyId),
-    autoCloseCallbackTab: settings.autoCloseCallbackTab !== false
+    autoCloseCallbackTab: settings.autoCloseCallbackTab !== false,
+    autoFillRecoveryCredentials: settings.autoFillRecoveryCredentials !== false
   };
 }
 
@@ -105,6 +108,44 @@ async function clearSession() {
   await chrome.storage.local.remove(SESSION_KEY);
   await chrome.alarms.clear(POLL_ALARM);
   await updateBadge(null);
+}
+
+async function getCredentialsCache() {
+  const stored = await chrome.storage.session.get(CREDENTIALS_CACHE_KEY).catch(() => ({}));
+  const cache = stored[CREDENTIALS_CACHE_KEY];
+  return cache && typeof cache === "object" ? cache : {};
+}
+
+async function setCredentialsCache(cache) {
+  await chrome.storage.session.set({ [CREDENTIALS_CACHE_KEY]: cache || {} }).catch(() => {});
+}
+
+async function cacheRecoveryCredentials(state, credentials) {
+  state = normalizeString(state);
+  if (!state || !credentials) {
+    return;
+  }
+  const cache = await getCredentialsCache();
+  cache[state] = {
+    email: normalizeString(credentials.email),
+    password: normalizeString(credentials.password),
+    hasPassword: credentials.has_password === true || normalizeString(credentials.password) !== "",
+    target: credentials.target || null,
+    cachedAt: Date.now()
+  };
+  await setCredentialsCache(cache);
+}
+
+async function clearRecoveryCredentials(state) {
+  state = normalizeString(state);
+  if (!state) {
+    return;
+  }
+  const cache = await getCredentialsCache();
+  if (cache[state]) {
+    delete cache[state];
+    await setCredentialsCache(cache);
+  }
 }
 
 async function updateBadge(session) {
@@ -179,6 +220,16 @@ function extractStateFromUrl(rawUrl) {
   }
 }
 
+function isOpenAIAuthPage(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    return /(^|\.)openai\.com$/i.test(parsed.hostname)
+      && /auth|login|authorize|u\/login/i.test(parsed.pathname + parsed.search);
+  } catch {
+    return false;
+  }
+}
+
 function extractAuthUrl(payload = {}) {
   return normalizeString(payload.url)
     || normalizeString(payload.auth_url)
@@ -208,6 +259,27 @@ async function testConnection(settingsInput) {
   return { ok: true, settings };
 }
 
+async function fetchRecoveryCredentialsForState(state) {
+  state = normalizeString(state);
+  if (!state) {
+    return null;
+  }
+  const settings = await getStoredSettings();
+  if (!settings.autoFillRecoveryCredentials) {
+    return null;
+  }
+  try {
+    const payload = await requestJson(
+      settings,
+      `/auth-files/recover-401/credentials?state=${encodeURIComponent(state)}`
+    );
+    await cacheRecoveryCredentials(state, payload);
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 async function startOAuth(settingsInput) {
   const settings = await setStoredSettings(settingsInput);
   const payload = await requestJson(settings, buildStartPath(settings));
@@ -235,6 +307,7 @@ async function startOAuth(settingsInput) {
   });
 
   await chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
+  await fetchRecoveryCredentialsForState(state);
   return { ok: true, session };
 }
 
@@ -381,6 +454,33 @@ async function maybeCaptureCallback(rawUrl, tabId) {
   return submitCallbackUrl(callback.url, { tabId });
 }
 
+async function maybePrepareRecoveryAutofill(rawUrl, tabId) {
+  if (!tabId || !isOpenAIAuthPage(rawUrl)) {
+    return null;
+  }
+  const state = extractStateFromUrl(rawUrl);
+  if (!state) {
+    return null;
+  }
+  const credentials = await fetchRecoveryCredentialsForState(state);
+  if (!credentials?.email) {
+    return null;
+  }
+  await chrome.tabs.sendMessage(tabId, {
+    type: "CLIRELAY_RECOVERY_CREDENTIALS",
+    state,
+    email: normalizeString(credentials.email),
+    password: normalizeString(credentials.password),
+    hasPassword: credentials.has_password === true || normalizeString(credentials.password) !== ""
+  }).catch(() => {});
+  return credentials;
+}
+
+async function handleTabUrl(rawUrl, tabId) {
+  await maybePrepareRecoveryAutofill(rawUrl, tabId).catch(() => {});
+  return maybeCaptureCallback(rawUrl, tabId);
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   await setStoredSettings(await getStoredSettings());
   await updateBadge(await getSession());
@@ -414,19 +514,19 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.webNavigation.onCommitted.addListener((details) => {
   if (details.frameId === 0 && details.url) {
-    maybeCaptureCallback(details.url, details.tabId).catch(() => {});
+    handleTabUrl(details.url, details.tabId).catch(() => {});
   }
 });
 
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
   if (details.frameId === 0 && details.url) {
-    maybeCaptureCallback(details.url, details.tabId).catch(() => {});
+    handleTabUrl(details.url, details.tabId).catch(() => {});
   }
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) {
-    maybeCaptureCallback(changeInfo.url, tabId).catch(() => {});
+    handleTabUrl(changeInfo.url, tabId).catch(() => {});
   }
 });
 
@@ -454,6 +554,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (type === "SUBMIT_CALLBACK") {
       return submitCallbackUrl(message.callbackUrl, { tabId: sender?.tab?.id || 0 });
+    }
+    if (type === "GET_RECOVERY_CREDENTIALS") {
+      const state = normalizeString(message.state) || extractStateFromUrl(sender?.tab?.url || "");
+      if (!state) {
+        return { ok: false, error: "missing oauth state" };
+      }
+      const cache = await getCredentialsCache();
+      let credentials = cache[state] || null;
+      if (!credentials || Date.now() - Number(credentials.cachedAt || 0) > 5 * 60 * 1000) {
+        credentials = await fetchRecoveryCredentialsForState(state);
+      }
+      if (!credentials?.email) {
+        return { ok: false, error: "recovery credentials unavailable" };
+      }
+      return { ok: true, credentials };
+    }
+    if (type === "CLEAR_RECOVERY_CREDENTIALS") {
+      await clearRecoveryCredentials(message.state);
+      return { ok: true };
     }
     if (type === "CLEAR_SESSION") {
       await clearSession();

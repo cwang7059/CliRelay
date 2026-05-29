@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -193,6 +194,90 @@ func TestMarkResult_UnauthorizedDisablesCredential(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != 1 {
 		t.Fatalf("expected 1 Save call for disabled state, got %d", got)
+	}
+}
+
+func TestMarkResult_UnauthorizedInvokesHandlerAfterDisable(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "test-auth-401-handler",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"email": "recover@example.com"},
+	}
+
+	ctx := WithSkipPersist(context.Background())
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	called := make(chan *Auth, 1)
+	mgr.SetUnauthorizedAuthHandler(func(ctx context.Context, snapshot *Auth, result Result) {
+		_ = ctx
+		if result.AuthID != auth.ID {
+			t.Errorf("handler AuthID = %q, want %q", result.AuthID, auth.ID)
+		}
+		called <- snapshot
+	})
+
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Success:  false,
+		Error:    &Error{Message: "unauthorized", HTTPStatus: http.StatusUnauthorized},
+	})
+
+	select {
+	case snapshot := <-called:
+		if snapshot == nil || !snapshot.Disabled || snapshot.Status != StatusDisabled {
+			t.Fatalf("handler snapshot not disabled: %#v", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unauthorized handler")
+	}
+}
+
+func TestSetUnauthorizedAuthHandlerCanBeCleared(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetUnauthorizedAuthHandler(func(context.Context, *Auth, Result) {})
+	mgr.SetUnauthorizedAuthHandler(nil)
+	mgr.emitUnauthorizedAuth(context.Background(), &Auth{ID: "noop"}, Result{AuthID: "noop"})
+}
+
+func TestMarkResult_UnauthorizedHandlerDoesNotRunUnderManagerLock(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "lock-check", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"email": "lock@example.com"}}
+	ctx := WithSkipPersist(context.Background())
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	mgr.SetUnauthorizedAuthHandler(func(ctx context.Context, snapshot *Auth, result Result) {
+		_ = ctx
+		_ = result
+		defer wg.Done()
+		if _, ok := mgr.GetByID(snapshot.ID); !ok {
+			t.Errorf("GetByID failed in handler")
+		}
+	})
+
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:  auth.ID,
+		Success: false,
+		Error:   &Error{Message: "unauthorized", HTTPStatus: http.StatusUnauthorized},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler appears blocked by manager lock")
 	}
 }
 

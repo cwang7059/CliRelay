@@ -23,6 +23,7 @@ const elements = {
   projectIdRow: document.getElementById("projectIdRow"),
   proxyId: document.getElementById("proxyId"),
   autoCloseCallbackTab: document.getElementById("autoCloseCallbackTab"),
+  autoFillRecoveryCredentials: document.getElementById("autoFillRecoveryCredentials"),
   statusText: document.getElementById("statusText"),
   statusPill: document.getElementById("statusPill"),
   sessionPanel: document.getElementById("sessionPanel"),
@@ -62,7 +63,8 @@ function collectSettings() {
     provider: elements.provider.value,
     projectId: elements.projectId.value,
     proxyId: elements.proxyId.value,
-    autoCloseCallbackTab: elements.autoCloseCallbackTab.checked
+    autoCloseCallbackTab: elements.autoCloseCallbackTab.checked,
+    autoFillRecoveryCredentials: elements.autoFillRecoveryCredentials.checked
   };
 }
 
@@ -95,6 +97,7 @@ function renderSettings(settings = {}) {
   elements.projectId.value = settings.projectId || "";
   elements.proxyId.value = settings.proxyId || "";
   elements.autoCloseCallbackTab.checked = settings.autoCloseCallbackTab !== false;
+  elements.autoFillRecoveryCredentials.checked = settings.autoFillRecoveryCredentials !== false;
   renderProviderFields();
 }
 

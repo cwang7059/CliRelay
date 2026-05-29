@@ -148,6 +148,9 @@ passthrough-headers: false
 # the account unavailable instead of deleting it.
 preserve-invalid-auth-files: false
 
+# When true, Codex accounts disabled by 401 automatically open a browser OAuth recovery flow.
+auto-recover-codex-401: true
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 
