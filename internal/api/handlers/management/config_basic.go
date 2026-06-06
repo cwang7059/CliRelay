@@ -375,18 +375,6 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
-func (h *Handler) GetAutoRecoverCodex401(c *gin.Context) {
-	enabled := true
-	if h != nil && h.cfg != nil {
-		enabled = h.cfg.AutoRecoverCodex401
-	}
-	c.JSON(http.StatusOK, gin.H{"auto-recover-codex-401": enabled})
-}
-
-func (h *Handler) PutAutoRecoverCodex401(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.AutoRecoverCodex401 = v })
-}
-
 // UsageStatisticsEnabled
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})

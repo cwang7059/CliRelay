@@ -294,9 +294,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
-	if authManager != nil {
-		authManager.SetUnauthorizedAuthHandler(s.mgmt.HandleUnauthorizedAuth)
-	}
 	s.mgmt.SetAccessManager(accessManager)
 	s.mgmt.SetConfigMutatedHook(func(updated *config.Config) {
 		if updated == nil {
@@ -375,6 +372,9 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	s.engine.GET("/manage", s.serveManagementControlPanel)
 	s.engine.GET("/manage/*filepath", s.serveManagementControlPanel)
+	s.engine.GET("/recovery-pool", func(c *gin.Context) {
+		c.File(filepath.Join(s.currentPath, "static", "recovery-pool.html"))
+	})
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -685,9 +685,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
-		mgmt.GET("/auto-recover-codex-401", s.mgmt.GetAutoRecoverCodex401)
-		mgmt.PUT("/auto-recover-codex-401", s.mgmt.PutAutoRecoverCodex401)
-		mgmt.PATCH("/auto-recover-codex-401", s.mgmt.PutAutoRecoverCodex401)
 
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
@@ -828,6 +825,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.POST("/auth-files/recover-401", s.mgmt.RecoverCodex401AuthFile)
 		mgmt.GET("/auth-files/recover-401/credentials", s.mgmt.GetCodex401RecoveryCredentials)
+		mgmt.GET("/auth-recovery/queue", s.mgmt.GetRecoveryQueue)
+		mgmt.GET("/auth-recovery/otp", s.mgmt.FetchOTP)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)

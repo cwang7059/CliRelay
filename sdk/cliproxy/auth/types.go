@@ -90,6 +90,8 @@ type Auth struct {
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
+	// Mailbox stores optional mail API configuration for automated OTP extraction.
+	Mailbox map[string]any `json:"mailbox,omitempty"`
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
@@ -149,6 +151,12 @@ func (a *Auth) Clone() *Auth {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()
+		}
+	}
+	if len(a.Mailbox) > 0 {
+		copyAuth.Mailbox = make(map[string]any, len(a.Mailbox))
+		for key, value := range a.Mailbox {
+			copyAuth.Mailbox[key] = value
 		}
 	}
 	copyAuth.Runtime = a.Runtime

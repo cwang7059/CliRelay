@@ -102,10 +102,6 @@ type Config struct {
 	// an unrecoverable auth error; affected accounts are marked unavailable instead.
 	PreserveInvalidAuthFiles bool `yaml:"preserve-invalid-auth-files" json:"preserve-invalid-auth-files"`
 
-	// AutoRecoverCodex401 starts a browser OAuth recovery flow when a Codex
-	// account is disabled after a 401/permanent-auth failure.
-	AutoRecoverCodex401 bool `yaml:"auto-recover-codex-401" json:"auto-recover-codex-401"`
-
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
@@ -795,7 +791,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RequestLogStorage.MaxTotalSizeMB = 1024
 	cfg.RequestLogStorage.VacuumOnCleanup = true
 	cfg.DisableCooling = false
-	cfg.AutoRecoverCodex401 = true
 	cfg.Routing.IncludeDefaultGroup = true
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

@@ -24,11 +24,13 @@ var (
 )
 
 type oauthSession struct {
-	Provider  string
-	Status    string
-	CreatedAt time.Time
-	ExpiresAt time.Time
-	Recovery  *oauthRecoveryContext
+	Provider         string
+	Status           string
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	Recovery         *oauthRecoveryContext
+	ImportPassword   string
+	ImportMailAPIURL string
 }
 
 type oauthRecoveryContext struct {
@@ -186,6 +188,36 @@ func (s *oauthSessionStore) Recovery(state string) (*oauthRecoveryContext, bool)
 	return session.Recovery.Clone(), true
 }
 
+func (s *oauthSessionStore) SetImportContext(state, password, mailAPIURL string) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return
+	}
+	password = strings.TrimSpace(password)
+	mailAPIURL = strings.TrimSpace(mailAPIURL)
+	if password == "" && mailAPIURL == "" {
+		return
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok {
+		return
+	}
+	if password != "" {
+		session.ImportPassword = password
+	}
+	if mailAPIURL != "" {
+		session.ImportMailAPIURL = mailAPIURL
+	}
+	session.ExpiresAt = now.Add(s.ttl)
+	s.sessions[state] = session
+}
+
 func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -234,6 +266,18 @@ func GetOAuthSession(state string) (provider string, status string, ok bool) {
 
 func GetOAuthSessionRecovery(state string) (*oauthRecoveryContext, bool) {
 	return oauthSessions.Recovery(state)
+}
+
+func SetOAuthSessionImportContext(state, password, mailAPIURL string) {
+	oauthSessions.SetImportContext(state, password, mailAPIURL)
+}
+
+func GetOAuthSessionImportContext(state string) (password, mailAPIURL string) {
+	session, ok := oauthSessions.Get(state)
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(session.ImportPassword), strings.TrimSpace(session.ImportMailAPIURL)
 }
 
 func IsOAuthSessionPending(state, provider string) bool {

@@ -8,8 +8,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -129,33 +127,187 @@ func TestGetCodex401RecoveryCredentialsReturnsSessionAccount(t *testing.T) {
 	}
 }
 
-func TestAutoRecoverCodex401ConfigEndpoint(t *testing.T) {
+func TestGetRecoveryQueueIncludesPasswordAndMailboxFlags(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("auto-recover-codex-401: true\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-mailbox.json",
+		FileName: "codex-mailbox.json",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{
+			"email":    "recover@example.com",
+			"password": "secret-password",
+			"phone":    "+15551234567",
+		},
+		Mailbox: map[string]any{
+			"mailapi_url": "http://mail.test/latest",
+		},
+	}); err != nil {
+		t.Fatalf("register mailbox auth: %v", err)
 	}
-	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, configPath, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-no-mailbox.json",
+		FileName: "codex-no-mailbox.json",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{
+			"email": "missing@example.com",
+		},
+	}); err != nil {
+		t.Fatalf("register auth without mailbox: %v", err)
+	}
+
+	h := NewHandler(&config.Config{AuthDir: t.TempDir()}, "", manager)
 	t.Cleanup(h.Close)
 
-	body, err := json.Marshal(map[string]any{"value": false})
-	if err != nil {
-		t.Fatalf("marshal body: %v", err)
+	req := httptest.NewRequest(http.MethodGet, "/queue", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.GetRecoveryQueue(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	req := httptest.NewRequest(http.MethodPut, "/auto-recover-codex-401", bytes.NewReader(body))
+	var payload []RecoveryQueueItem
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	byID := map[string]RecoveryQueueItem{}
+	for _, item := range payload {
+		byID[item.ID] = item
+	}
+	if item := byID["codex-mailbox.json"]; !item.HasPassword || !item.HasMailbox || !item.HasPhone || item.Phone != "+15551234567" {
+		t.Fatalf("mailbox auth flags = %#v", item)
+	}
+	if item := byID["codex-no-mailbox.json"]; item.HasPassword || item.HasMailbox {
+		t.Fatalf("no-mailbox auth flags = %#v", item)
+	}
+}
+
+func TestFetchOTPUsesMetadataMailbox(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mailServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"body":"Your OpenAI verification code is 123456."}`))
+	}))
+	t.Cleanup(mailServer.Close)
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-mailbox.json",
+		FileName: "codex-mailbox.json",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{
+			"email": "recover@example.com",
+			"mailbox": map[string]any{
+				"mailapi_url": mailServer.URL,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register mailbox auth: %v", err)
+	}
+
+	h := NewHandler(&config.Config{AuthDir: t.TempDir()}, "", manager)
+	t.Cleanup(h.Close)
+
+	req := httptest.NewRequest(http.MethodGet, "/otp?email=recover@example.com", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.FetchOTP(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != "123456" {
+		t.Fatalf("unexpected code: %#v", payload)
+	}
+}
+
+func TestRecoverCodex401AuthFileStartsRecoverySession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldSessions := oauthSessions
+	oauthSessions = newOAuthSessionStore(oauthSessionTTL)
+	t.Cleanup(func() { oauthSessions = oldSessions })
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-old.json",
+		FileName: "codex-old.json",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{
+			"email":    "recover@example.com",
+			"password": "secret-password",
+		},
+	}); err != nil {
+		t.Fatalf("register target auth: %v", err)
+	}
+
+	h := NewHandler(&config.Config{AuthDir: t.TempDir()}, "", manager)
+	t.Cleanup(h.Close)
+
+	body := []byte(`{"name":"codex-old.json","open_browser":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/recover-401", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = req
 
-	h.PutAutoRecoverCodex401(c)
+	h.RecoverCodex401AuthFile(c)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	if h.cfg.AutoRecoverCodex401 {
-		t.Fatal("expected auto recover setting to be disabled")
+	var payload struct {
+		Status string `json:"status"`
+		URL    string `json:"url"`
+		State  string `json:"state"`
+		Target struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		} `json:"target"`
 	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Status != "ok" || payload.URL == "" || payload.State == "" {
+		t.Fatalf("unexpected recovery response: %#v", payload)
+	}
+	if payload.Target.ID != "codex-old.json" || payload.Target.Email != "recover@example.com" {
+		t.Fatalf("unexpected target: %#v", payload.Target)
+	}
+	recovery, ok := GetOAuthSessionRecovery(payload.State)
+	if !ok || recovery == nil {
+		t.Fatal("expected recovery session to be registered")
+	}
+	if recovery.TargetID != "codex-old.json" || recovery.TargetEmail != "recover@example.com" {
+		t.Fatalf("unexpected recovery context: %#v", recovery)
+	}
+	provider, status, exists := GetOAuthSession(payload.State)
+	if !exists || provider != "codex" || status != "" {
+		t.Fatalf("unexpected oauth session provider=%q status=%q exists=%v", provider, status, exists)
+	}
+	CompleteOAuthSession(payload.State)
 }
 
 func TestSortAuthFileEntriesPutsAvailableFirst(t *testing.T) {
@@ -231,7 +383,7 @@ func TestSaveRecoveredCodexAuthOverwritesTargetAndReactivates(t *testing.T) {
 		cfg:         &config.Config{},
 		authManager: manager,
 	}
-	path, err := h.saveRecoveredCodexAuth(ctx, &oauthRecoveryContext{
+	path, err := h.saveRecoveredCodexAuth(ctx, "oauth-state-recover", &oauthRecoveryContext{
 		TargetID:        "codex-old.json",
 		TargetName:      "codex-old.json",
 		TargetFileName:  "codex-old.json",
@@ -288,7 +440,7 @@ func TestSaveRecoveredCodexAuthRejectsEmailMismatch(t *testing.T) {
 		authManager: manager,
 	}
 
-	_, err := h.saveRecoveredCodexAuth(context.Background(), &oauthRecoveryContext{
+	_, err := h.saveRecoveredCodexAuth(context.Background(), "oauth-state-mismatch", &oauthRecoveryContext{
 		TargetID:    "codex-old.json",
 		TargetEmail: "expected@example.com",
 	}, &coreauth.Auth{
@@ -301,52 +453,6 @@ func TestSaveRecoveredCodexAuthRejectsEmailMismatch(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected email mismatch error")
-	}
-}
-
-func TestBeginAutoCodex401RecoveryDeduplicatesAndExpires(t *testing.T) {
-	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, "", nil)
-	t.Cleanup(h.Close)
-
-	if !h.beginAutoCodex401Recovery("codex-old.json") {
-		t.Fatal("expected first recovery attempt to start")
-	}
-	if h.beginAutoCodex401Recovery("codex-old.json") {
-		t.Fatal("expected duplicate recovery attempt to be suppressed")
-	}
-
-	h.autoRecoveryMu.Lock()
-	h.autoRecoveryInFlight["codex-old.json"] = time.Now().Add(-autoCodex401RecoveryCooldown - time.Second)
-	h.autoRecoveryInFlight[autoCodex401RecoveryGlobalKey] = time.Now().Add(-autoCodex401RecoveryCooldown - time.Second)
-	h.autoRecoveryMu.Unlock()
-
-	if !h.beginAutoCodex401Recovery("codex-old.json") {
-		t.Fatal("expected expired recovery attempt to start again")
-	}
-}
-
-func TestFinishAutoCodex401RecoveryClearsInFlight(t *testing.T) {
-	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, "", nil)
-	t.Cleanup(h.Close)
-
-	if !h.beginAutoCodex401Recovery("codex-old.json") {
-		t.Fatal("expected first recovery attempt to start")
-	}
-	h.finishAutoCodex401Recovery("codex-old.json")
-	if !h.beginAutoCodex401Recovery("codex-old.json") {
-		t.Fatal("expected recovery attempt after finish to start")
-	}
-}
-
-func TestBeginAutoCodex401RecoverySuppressesConcurrentDifferentAuth(t *testing.T) {
-	h := NewHandler(&config.Config{AutoRecoverCodex401: true}, "", nil)
-	t.Cleanup(h.Close)
-
-	if !h.beginAutoCodex401Recovery("codex-a.json") {
-		t.Fatal("expected first recovery attempt to start")
-	}
-	if h.beginAutoCodex401Recovery("codex-b.json") {
-		t.Fatal("expected concurrent recovery for different auth to be suppressed")
 	}
 }
 

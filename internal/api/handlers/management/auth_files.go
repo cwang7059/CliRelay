@@ -29,7 +29,6 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -1192,6 +1191,25 @@ func authPassword(auth *coreauth.Auth) string {
 	}
 	if auth.Attributes != nil {
 		for _, key := range []string{"password", "login_password", "loginPassword", "account_password", "accountPassword"} {
+			if v := strings.TrimSpace(auth.Attributes[key]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func authPhone(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if v := metadataString(auth.Metadata, "phone", "phone_number", "phoneNumber", "mobile", "msisdn"); v != "" {
+			return v
+		}
+	}
+	if auth.Attributes != nil {
+		for _, key := range []string{"phone", "phone_number", "phoneNumber", "mobile", "msisdn"} {
 			if v := strings.TrimSpace(auth.Attributes[key]); v != "" {
 				return v
 			}
@@ -2371,14 +2389,11 @@ type codexOAuthStartOptions struct {
 	Recovery                 *oauthRecoveryContext
 	UseCallbackForwarder     bool
 	RequireCallbackForwarder bool
-	OpenBrowser              bool
 }
 
 type codexOAuthStartResult struct {
-	URL       string
-	State     string
-	Opened    bool
-	OpenError string
+	URL   string
+	State string
 }
 
 func codexTokenRecordFromBundle(openaiAuth *codex.CodexAuth, bundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
@@ -2474,31 +2489,6 @@ func (h *Handler) startCodexOAuthFlow(ctx context.Context, opts codexOAuthStartO
 		URL:   authURL,
 		State: state,
 	}
-	if opts.OpenBrowser {
-		var helperErr error
-		if opts.Recovery != nil {
-			helperErr = h.openCodexRecoveryBrowser(authURL)
-			if helperErr == nil {
-				result.Opened = true
-			} else {
-				log.WithError(helperErr).Warn("failed to open codex recovery with chrome helper; falling back to default browser")
-			}
-		}
-		if !result.Opened {
-			if errOpen := browser.OpenURL(authURL); errOpen != nil {
-				if helperErr != nil {
-					result.OpenError = fmt.Sprintf("%v; fallback browser: %v", helperErr, errOpen)
-				} else {
-					result.OpenError = errOpen.Error()
-				}
-				log.WithError(errOpen).Warn("failed to open browser for codex oauth recovery")
-			} else {
-				result.Opened = true
-			}
-		} else {
-			log.Debug("opened codex recovery with chrome auth helper")
-		}
-	}
 
 	go func() {
 		if forwarder != nil {
@@ -2573,9 +2563,35 @@ func (h *Handler) startCodexOAuthFlow(ctx context.Context, opts codexOAuthStartO
 	return result, nil
 }
 
+func applyOAuthSessionImportMetadata(state string, auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	password, mailAPIURL := GetOAuthSessionImportContext(state)
+	if password == "" {
+		if recovery, ok := GetOAuthSessionRecovery(state); ok && recovery != nil {
+			password = strings.TrimSpace(recovery.TargetPassword)
+		}
+	}
+	if password == "" && mailAPIURL == "" {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	if password != "" {
+		auth.Metadata["password"] = password
+	}
+	if mailAPIURL != "" {
+		auth.Metadata["mailapi_url"] = mailAPIURL
+		auth.Mailbox = map[string]any{"mailapi_url": mailAPIURL}
+	}
+}
+
 func (h *Handler) saveCodexOAuthRecord(ctx context.Context, state string, record *coreauth.Auth) (string, error) {
+	applyOAuthSessionImportMetadata(state, record)
 	if recovery, ok := GetOAuthSessionRecovery(state); ok && recovery != nil {
-		return h.saveRecoveredCodexAuth(ctx, recovery, record)
+		return h.saveRecoveredCodexAuth(ctx, state, recovery, record)
 	}
 	return h.saveAndActivateTokenRecord(ctx, record)
 }
@@ -2587,8 +2603,7 @@ func (h *Handler) RecoverCodex401AuthFile(c *gin.Context) {
 	}
 
 	var req struct {
-		Name        string `json:"name"`
-		OpenBrowser *bool  `json:"open_browser"`
+		Name string `json:"name"`
 	}
 	if c.Request != nil && c.Request.Body != nil && c.Request.ContentLength != 0 {
 		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -2601,19 +2616,6 @@ func (h *Handler) RecoverCodex401AuthFile(c *gin.Context) {
 	if name == "" {
 		name = strings.TrimSpace(c.Query("name"))
 	}
-	openBrowser := true
-	if req.OpenBrowser != nil {
-		openBrowser = *req.OpenBrowser
-	}
-	if raw := strings.TrimSpace(c.Query("open_browser")); raw != "" {
-		switch strings.ToLower(raw) {
-		case "0", "false", "no", "off":
-			openBrowser = false
-		case "1", "true", "yes", "on":
-			openBrowser = true
-		}
-	}
-
 	target, err := h.findCodexRecoveryTarget(name)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2632,8 +2634,7 @@ func (h *Handler) RecoverCodex401AuthFile(c *gin.Context) {
 
 	result, err := h.startCodexOAuthFlow(detachedAuthContext(c), codexOAuthStartOptions{
 		Recovery:             recovery,
-		UseCallbackForwarder: true,
-		OpenBrowser:          openBrowser,
+		UseCallbackForwarder: false,
 	})
 	if err != nil {
 		log.Errorf("Failed to start Codex recovery: %v", err)
@@ -2645,16 +2646,15 @@ func (h *Handler) RecoverCodex401AuthFile(c *gin.Context) {
 		"status": "ok",
 		"url":    result.URL,
 		"state":  result.State,
-		"opened": result.Opened,
 		"target": gin.H{
-			"id":         recovery.TargetID,
-			"name":       recovery.TargetName,
-			"email":      recovery.TargetEmail,
-			"account_id": recovery.TargetAccountID,
+			"id":          recovery.TargetID,
+			"name":        recovery.TargetName,
+			"email":       recovery.TargetEmail,
+			"phone":       authPhone(target),
+			"account_id":  recovery.TargetAccountID,
+			"has_phone":   authPhone(target) != "",
+			"has_mailbox": authHasMailbox(target),
 		},
-	}
-	if result.OpenError != "" {
-		payload["open_error"] = result.OpenError
 	}
 	c.JSON(http.StatusOK, payload)
 }
@@ -2685,8 +2685,12 @@ func (h *Handler) GetCodex401RecoveryCredentials(c *gin.Context) {
 
 	email := strings.TrimSpace(recovery.TargetEmail)
 	password := strings.TrimSpace(recovery.TargetPassword)
-	if (email == "" || password == "") && h != nil && h.authManager != nil && strings.TrimSpace(recovery.TargetID) != "" {
+	phone := ""
+	hasMailbox := false
+	if h != nil && h.authManager != nil && strings.TrimSpace(recovery.TargetID) != "" {
 		if auth, found := h.authManager.GetByID(recovery.TargetID); found && auth != nil {
+			hasMailbox = authHasMailbox(auth)
+			phone = strings.TrimSpace(authPhone(auth))
 			if email == "" {
 				email = strings.TrimSpace(authEmail(auth))
 			}
@@ -2703,12 +2707,18 @@ func (h *Handler) GetCodex401RecoveryCredentials(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"email":        email,
 		"password":     password,
+		"phone":        phone,
 		"has_password": password != "",
+		"has_phone":    phone != "",
+		"has_mailbox":  hasMailbox,
 		"target": gin.H{
-			"id":         recovery.TargetID,
-			"name":       recovery.TargetName,
-			"email":      email,
-			"account_id": recovery.TargetAccountID,
+			"id":          recovery.TargetID,
+			"name":        recovery.TargetName,
+			"email":       email,
+			"phone":       phone,
+			"account_id":  recovery.TargetAccountID,
+			"has_phone":   phone != "",
+			"has_mailbox": hasMailbox,
 		},
 	})
 }
@@ -2803,7 +2813,7 @@ func recoveryContextFromAuth(auth *coreauth.Auth) *oauthRecoveryContext {
 	}
 }
 
-func (h *Handler) saveRecoveredCodexAuth(ctx context.Context, recovery *oauthRecoveryContext, record *coreauth.Auth) (string, error) {
+func (h *Handler) saveRecoveredCodexAuth(ctx context.Context, state string, recovery *oauthRecoveryContext, record *coreauth.Auth) (string, error) {
 	if h == nil {
 		return "", fmt.Errorf("handler unavailable")
 	}
@@ -2813,7 +2823,6 @@ func (h *Handler) saveRecoveredCodexAuth(ctx context.Context, recovery *oauthRec
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}
-	defer h.finishAutoCodex401Recovery(recovery.TargetID)
 
 	recordEmail := strings.ToLower(strings.TrimSpace(authEmail(record)))
 	if recordEmail == "" && record.Metadata != nil {
@@ -2894,6 +2903,7 @@ func (h *Handler) saveRecoveredCodexAuth(ctx context.Context, recovery *oauthRec
 	delete(recovered.Metadata, "statusMessage")
 	normalizeCodexAuthMetadata(recovered.Provider, recovered.Metadata)
 	syncRecoveredRoutingMetadata(recovered)
+	applyOAuthSessionImportMetadata(state, recovered)
 
 	return h.saveAndActivateTokenRecord(ctx, recovered)
 }

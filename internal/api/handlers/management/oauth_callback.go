@@ -10,11 +10,15 @@ import (
 )
 
 type oauthCallbackRequest struct {
-	Provider    string `json:"provider"`
-	RedirectURL string `json:"redirect_url"`
-	Code        string `json:"code"`
-	State       string `json:"state"`
-	Error       string `json:"error"`
+	Provider     string `json:"provider"`
+	RedirectURL  string `json:"redirect_url"`
+	Code         string `json:"code"`
+	State        string `json:"state"`
+	Error        string `json:"error"`
+	Password     string `json:"password"`
+	MailAPIURL   string `json:"mailapi_url"`
+	MailboxURL   string `json:"mailbox_url"`
+	LoginPassword string `json:"login_password"`
 }
 
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
@@ -89,6 +93,18 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	if !strings.EqualFold(sessionProvider, canonicalProvider) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
 		return
+	}
+
+	importPassword := strings.TrimSpace(req.Password)
+	if importPassword == "" {
+		importPassword = strings.TrimSpace(req.LoginPassword)
+	}
+	importMailAPIURL := strings.TrimSpace(req.MailAPIURL)
+	if importMailAPIURL == "" {
+		importMailAPIURL = strings.TrimSpace(req.MailboxURL)
+	}
+	if importPassword != "" || importMailAPIURL != "" {
+		SetOAuthSessionImportContext(state, importPassword, importMailAPIURL)
 	}
 
 	if _, errWrite := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, canonicalProvider, state, code, errMsg); errWrite != nil {

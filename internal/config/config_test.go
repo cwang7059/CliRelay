@@ -110,42 +110,6 @@ func TestLoadConfigDefaultsAutoUpdateEnabled(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDefaultsAutoRecoverCodex401Enabled(t *testing.T) {
-	t.Parallel()
-
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := LoadConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadConfig returned error: %v", err)
-	}
-
-	if !cfg.AutoRecoverCodex401 {
-		t.Fatalf("AutoRecoverCodex401 = false, want true by default")
-	}
-}
-
-func TestLoadConfigReadsDisabledAutoRecoverCodex401(t *testing.T) {
-	t.Parallel()
-
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("auto-recover-codex-401: false\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := LoadConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadConfig returned error: %v", err)
-	}
-
-	if cfg.AutoRecoverCodex401 {
-		t.Fatalf("AutoRecoverCodex401 = true, want false from config")
-	}
-}
-
 func TestLoadConfigReadsDisabledAutoUpdate(t *testing.T) {
 	t.Parallel()
 
