@@ -205,7 +205,8 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 // Parsing priority:
 //  1. Special values: "none" → ModeNone, "auto"/"-1" → ModeAuto
 //  2. Level names: "minimal", "low", "medium", "high", "xhigh" → ModeLevel
-//  3. Numeric values: positive integers → ModeBudget, 0 → ModeNone
+//  3. Multiplier aliases: "2x", "1x", "0.5x", "0.25x" → ModeLevel
+//  4. Numeric values: positive integers → ModeBudget, 0 → ModeNone
 //
 // If none of the above match, returns empty ThinkingConfig (treated as no config).
 func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
@@ -224,7 +225,12 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 		return ThinkingConfig{Mode: ModeLevel, Level: level}
 	}
 
-	// 3. Try numeric parsing
+	// 3. Try speed multiplier aliases
+	if level, ok := ParseMultiplierSuffix(rawSuffix); ok {
+		return ThinkingConfig{Mode: ModeLevel, Level: level}
+	}
+
+	// 4. Try numeric parsing
 	if budget, ok := ParseNumericSuffix(rawSuffix); ok {
 		if budget == 0 {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}

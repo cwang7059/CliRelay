@@ -144,3 +144,40 @@ func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 		return "", false
 	}
 }
+
+// ParseMultiplierSuffix attempts to parse a raw suffix as a speed multiplier
+// alias for thinking effort.
+//
+// Higher speed multipliers map to lower thinking effort. This does not make the
+// upstream model support a real speed_multiplier parameter; it provides a
+// friendlier alias over the existing thinking levels.
+//
+// Examples:
+//   - "2x" -> level=LevelLow, ok=true
+//   - "1x" -> level=LevelMedium, ok=true
+//   - "0.5x" -> level=LevelHigh, ok=true
+//   - "0.25x" -> level=LevelXHigh, ok=true
+func ParseMultiplierSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
+	if rawSuffix == "" {
+		return "", false
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(rawSuffix))
+	normalized = strings.TrimPrefix(normalized, "speed:")
+	normalized = strings.TrimPrefix(normalized, "speed=")
+	normalized = strings.TrimPrefix(normalized, "multiplier:")
+	normalized = strings.TrimPrefix(normalized, "multiplier=")
+
+	switch normalized {
+	case "4x", "3x", "2x", "fast", "faster", "turbo":
+		return LevelLow, true
+	case "1x", "normal", "standard":
+		return LevelMedium, true
+	case "0.5x", ".5x", "half", "slow":
+		return LevelHigh, true
+	case "0.25x", ".25x", "quarter", "deep", "deeper":
+		return LevelXHigh, true
+	default:
+		return "", false
+	}
+}
