@@ -80,4 +80,3 @@ echo Closing old Electron client windows...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$roots = @('%ELECTRON_ROOT%', '%LOCAL_ELECTRON_ROOT%') | ForEach-Object { try { (Resolve-Path -LiteralPath $_ -ErrorAction Stop).ProviderPath.TrimEnd('\') } catch { $null } } | Where-Object { $_ }; Get-CimInstance Win32_Process | Where-Object { @('Code Proxy Admin.exe', 'electron.exe') -contains $_.Name } | Where-Object { $exe = [string]$_.ExecutablePath; $cmd = [string]$_.CommandLine; $matched = $false; foreach ($root in $roots) { if (($exe -and $exe.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) -or ($cmd -and $cmd.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0)) { $matched = $true; break } }; $matched } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }"
 powershell -NoProfile -Command "Start-Sleep -Milliseconds 500" >nul
 exit /b 0
-
