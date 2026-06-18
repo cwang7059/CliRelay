@@ -408,6 +408,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
+	v1.Use(ccSwitchImportRouteEnabledMiddleware())
 	v1.Use(AuthMiddleware(s.accessManager))
 	v1.Use(channelGroupAuthorizationMiddleware())
 	v1.Use(middleware.QuotaMiddleware())
@@ -417,6 +418,7 @@ func (s *Server) setupRoutes() {
 
 	groupedV1 := s.engine.Group("/:group/v1")
 	groupedV1.Use(groupRoutingMiddleware(resolveRoute))
+	groupedV1.Use(ccSwitchImportRouteEnabledMiddleware())
 	groupedV1.Use(AuthMiddleware(s.accessManager))
 	groupedV1.Use(channelGroupAuthorizationMiddleware())
 	groupedV1.Use(middleware.QuotaMiddleware())
@@ -426,6 +428,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
+	v1beta.Use(ccSwitchImportRouteEnabledMiddleware())
 	v1beta.Use(AuthMiddleware(s.accessManager))
 	v1beta.Use(channelGroupAuthorizationMiddleware())
 	v1beta.Use(middleware.QuotaMiddleware())
@@ -434,6 +437,7 @@ func (s *Server) setupRoutes() {
 
 	groupedV1Beta := s.engine.Group("/:group/v1beta")
 	groupedV1Beta.Use(groupRoutingMiddleware(resolveRoute))
+	groupedV1Beta.Use(ccSwitchImportRouteEnabledMiddleware())
 	groupedV1Beta.Use(AuthMiddleware(s.accessManager))
 	groupedV1Beta.Use(channelGroupAuthorizationMiddleware())
 	groupedV1Beta.Use(middleware.QuotaMiddleware())

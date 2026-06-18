@@ -298,6 +298,27 @@ func normalizeCcSwitchModelMappings(values []CcSwitchModelMappingRow) []CcSwitch
 	return result
 }
 
+func LookupCcSwitchImportConfigByRoutePath(routePath string) (*CcSwitchImportConfigRow, bool) {
+	db := getDB()
+	if db == nil {
+		return nil, false
+	}
+
+	normalizedRoutePath := normalizeCcSwitchRoutePath(routePath)
+	if normalizedRoutePath == "" {
+		return nil, false
+	}
+
+	row := db.QueryRow(`SELECT id, client_type, provider_name, note, enabled, default_model,
+		model_mappings, allowed_channel_groups, route_path, endpoint_path, usage_auto_interval, api_key_field, created_at, updated_at
+		FROM ccswitch_import_configs WHERE route_path = ? LIMIT 1`, normalizedRoutePath)
+	result := scanCcSwitchImportConfigFromRow(row)
+	if result == nil {
+		return nil, false
+	}
+	return result, true
+}
+
 func normalizeCcSwitchModelRole(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "main", "haiku", "sonnet", "opus":

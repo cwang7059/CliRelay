@@ -15,6 +15,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkhandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -100,6 +101,16 @@ func newTestServerWithConfig(t *testing.T, configure func(*proxyconfig.Config)) 
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func initServerTestUsageDB(t *testing.T) {
+	t.Helper()
+	usage.CloseDB()
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, proxyconfig.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {
@@ -257,6 +268,79 @@ func TestGroupedNestedV1RouteForbiddenByAPIKeyGroups(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "channel_group_forbidden") {
 		t.Fatalf("expected channel_group_forbidden in body, got %s", rr.Body.String())
+	}
+}
+
+func TestGroupedNestedV1RouteForbiddenWhenCcSwitchImportDisabled(t *testing.T) {
+	initServerTestUsageDB(t)
+	if err := usage.ReplaceAllCcSwitchImportConfigs([]usage.CcSwitchImportConfigRow{
+		{
+			ID:            "cfg-codex-disabled",
+			ClientType:    "codex",
+			ProviderName:  "Relay Codex",
+			Enabled:       false,
+			DefaultModel:  "gpt-5.5",
+			RoutePath:     "/openai/plus",
+			EndpointPath:  "/",
+			ModelMappings: []usage.CcSwitchModelMappingRow{},
+		},
+	}); err != nil {
+		t.Fatalf("ReplaceAllCcSwitchImportConfigs() error = %v", err)
+	}
+
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.Routing.PathRoutes = []proxyconfig.RoutingPathRoute{
+			{Path: "/openai/plus", Group: "pro"},
+		}
+		cfg.SanitizeRouting()
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/plus/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "ccswitch_import_disabled") {
+		t.Fatalf("expected ccswitch_import_disabled in body, got %s", rr.Body.String())
+	}
+}
+
+func TestGroupedNestedV1RouteAllowedWhenCcSwitchImportEnabled(t *testing.T) {
+	initServerTestUsageDB(t)
+	if err := usage.ReplaceAllCcSwitchImportConfigs([]usage.CcSwitchImportConfigRow{
+		{
+			ID:            "cfg-codex-enabled",
+			ClientType:    "codex",
+			ProviderName:  "Relay Codex",
+			Enabled:       true,
+			DefaultModel:  "gpt-5.5",
+			RoutePath:     "/openai/plus",
+			EndpointPath:  "/",
+			ModelMappings: []usage.CcSwitchModelMappingRow{},
+		},
+	}); err != nil {
+		t.Fatalf("ReplaceAllCcSwitchImportConfigs() error = %v", err)
+	}
+
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.Routing.PathRoutes = []proxyconfig.RoutingPathRoute{
+			{Path: "/openai/plus", Group: "pro"},
+		}
+		cfg.SanitizeRouting()
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/plus/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 }
 

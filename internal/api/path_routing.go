@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -137,6 +138,35 @@ func channelGroupAuthorizationMiddleware() gin.HandlerFunc {
 				"type":    "forbidden",
 				"code":    "channel_group_forbidden",
 				"group":   route.Group,
+			},
+		})
+	}
+}
+
+func ccSwitchImportRouteEnabledMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		route := pathRouteContextFromGin(c)
+		if route == nil || route.RoutePath == "" {
+			c.Next()
+			return
+		}
+
+		configRow, ok := usage.LookupCcSwitchImportConfigByRoutePath(route.RoutePath)
+		if !ok {
+			c.Next()
+			return
+		}
+		if configRow.Enabled {
+			c.Next()
+			return
+		}
+
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error": map[string]any{
+				"message": "ccswitch import route is disabled",
+				"type":    "forbidden",
+				"code":    "ccswitch_import_disabled",
+				"route":   route.RoutePath,
 			},
 		})
 	}
