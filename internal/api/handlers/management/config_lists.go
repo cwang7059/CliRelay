@@ -253,6 +253,21 @@ func (h *Handler) PutAPIKeyPermissionProfiles(c *gin.Context) {
 // api-key-entries: backed by SQLite api_keys table
 func (h *Handler) GetAPIKeyEntries(c *gin.Context) {
 	rows := usage.ListAPIKeys()
+	if !isPanelAdmin(c) {
+		userID := panelUserIDFromContext(c)
+		filtered := make([]usage.APIKeyRow, 0)
+		for _, row := range rows {
+			allowed, err := usage.PanelUserAllowedAPIKey(panelRoleFromContext(c), userID, row.Key)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if allowed {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
 	entries := make([]config.APIKeyEntry, 0, len(rows))
 	for _, r := range rows {
 		entries = append(entries, r.ToConfigEntry())

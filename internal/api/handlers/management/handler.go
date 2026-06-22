@@ -245,47 +245,45 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				h.attemptsMu.Unlock()
 			}
 		}
-		if secretHash == "" && envSecret == "" {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
-			return
-		}
-
-		// Accept either Authorization: Bearer <key> or X-Management-Key
-		var provided string
-		if ah := c.GetHeader("Authorization"); ah != "" {
-			parts := strings.SplitN(ah, " ", 2)
-			if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-				provided = parts[1]
-			} else {
-				provided = ah
-			}
-		}
-		if provided == "" {
-			provided = c.GetHeader("X-Management-Key")
-		}
-		// Fallback: ?token= query param (needed for WebSocket — browsers can't set custom headers)
-		if provided == "" {
-			provided = c.Query("token")
-		}
-
+		provided := extractProvidedCredential(c)
 		if provided == "" {
 			if !localClient {
 				fail()
 			}
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing management key"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing credentials"})
 			return
 		}
 
-		if localClient {
-			if lp := h.localPassword; lp != "" {
-				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-					c.Next()
-					return
+		if usage.IsPanelSessionToken(provided) {
+			if _, user, ok := usage.LookupPanelSession(provided); ok {
+				if !localClient {
+					h.attemptsMu.Lock()
+					if ai := h.failedAttempts[clientIP]; ai != nil {
+						ai.count = 0
+						ai.blockedUntil = time.Time{}
+					}
+					h.attemptsMu.Unlock()
 				}
+				setPanelContext(c, user.Role, user.ID, user.Username, panelAuthModeSession)
+				c.Next()
+				return
 			}
+			if !localClient {
+				fail()
+			}
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired session"})
+			return
 		}
 
-		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
+		if secretHash == "" && envSecret == "" && !(localClient && h.localPassword != "") {
+			if !localClient {
+				fail()
+			}
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
+			return
+		}
+
+		if h.validateLegacyManagementKey(provided, localClient) {
 			if !localClient {
 				h.attemptsMu.Lock()
 				if ai := h.failedAttempts[clientIP]; ai != nil {
@@ -294,29 +292,47 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				}
 				h.attemptsMu.Unlock()
 			}
+			setPanelContext(c, usage.PanelRoleAdmin, "", "admin", panelAuthModeLegacy)
 			c.Next()
 			return
 		}
 
-		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-			if !localClient {
-				fail()
-			}
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
-			return
-		}
-
 		if !localClient {
-			h.attemptsMu.Lock()
-			if ai := h.failedAttempts[clientIP]; ai != nil {
-				ai.count = 0
-				ai.blockedUntil = time.Time{}
-			}
-			h.attemptsMu.Unlock()
+			fail()
 		}
-
-		c.Next()
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 	}
+}
+
+func (h *Handler) authenticateLegacyManagementKey(c *gin.Context) bool {
+	clientIP := c.ClientIP()
+	localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+	return h.validateLegacyManagementKey(extractProvidedCredential(c), localClient)
+}
+
+func (h *Handler) validateLegacyManagementKey(provided string, localClient bool) bool {
+	provided = strings.TrimSpace(provided)
+	if provided == "" {
+		return false
+	}
+	if localClient {
+		if lp := h.localPassword; lp != "" {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+				return true
+			}
+		}
+	}
+	if h.envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(h.envSecret)) == 1 {
+		return true
+	}
+	secretHash := ""
+	if h.cfg != nil {
+		secretHash = h.cfg.RemoteManagement.SecretKey
+	}
+	if secretHash != "" && bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) == nil {
+		return true
+	}
+	return false
 }
 
 // persist saves the current in-memory config to disk.
