@@ -656,6 +656,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage/chart-data", s.mgmt.GetUsageChartData)
 		mgmt.GET("/usage/entity-stats", s.mgmt.GetEntityUsageStats)
 		mgmt.GET("/config", s.mgmt.GetConfig)
+		mgmt.PUT("/management-key", s.mgmt.PutManagementSecretKey)
+		mgmt.PATCH("/management-key", s.mgmt.PutManagementSecretKey)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)

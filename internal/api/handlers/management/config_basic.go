@@ -19,6 +19,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,6 +34,31 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		return
 	}
 	c.JSON(200, sanitizeConfigForAPI(h.cfg))
+}
+
+func (h *Handler) PutManagementSecretKey(c *gin.Context) {
+	var body struct {
+		Value *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	nextKey := strings.TrimSpace(*body.Value)
+	if nextKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "management key cannot be empty"})
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(nextKey), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash management key"})
+		return
+	}
+
+	h.cfg.RemoteManagement.SecretKey = string(hashed)
+	h.persist(c)
 }
 
 // maskKey masks an API key / secret, preserving first 6 and last 4 characters.
