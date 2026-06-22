@@ -15,6 +15,12 @@ import (
 //
 // GET /v0/management/dashboard-summary?days=7
 func (h *Handler) GetDashboardSummary(c *gin.Context) {
+	scope, err := h.resolveUsageScope(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	cfg := h.cfg
 
 	// ── Provider key counts ──
@@ -26,21 +32,25 @@ func (h *Handler) GetDashboardSummary(c *gin.Context) {
 	authFileCount := 0
 	apiKeyCount := 0
 
-	if cfg != nil {
-		geminiCount = len(cfg.GeminiKey)
-		claudeCount = len(cfg.ClaudeKey)
-		codexCount = len(cfg.CodexKey)
-		vertexCount = len(cfg.VertexCompatAPIKey)
-		openaiCount = len(cfg.OpenAICompatibility)
-	}
-	apiKeyCount = len(usage.ListAPIKeys())
+	if !scope.Restricted {
+		if cfg != nil {
+			geminiCount = len(cfg.GeminiKey)
+			claudeCount = len(cfg.ClaudeKey)
+			codexCount = len(cfg.CodexKey)
+			vertexCount = len(cfg.VertexCompatAPIKey)
+			openaiCount = len(cfg.OpenAICompatibility)
+		}
+		apiKeyCount = len(usage.ListAPIKeys())
 
-	if h.authManager != nil {
-		for _, auth := range h.authManager.List() {
-			if entry := h.buildAuthFileEntry(auth); entry != nil {
-				authFileCount++
+		if h.authManager != nil {
+			for _, auth := range h.authManager.List() {
+				if entry := h.buildAuthFileEntry(auth); entry != nil {
+					authFileCount++
+				}
 			}
 		}
+	} else {
+		apiKeyCount = len(scope.Keys)
 	}
 
 	providerTotal := geminiCount + claudeCount + codexCount + vertexCount + openaiCount
@@ -52,8 +62,8 @@ func (h *Handler) GetDashboardSummary(c *gin.Context) {
 		days = v
 	}
 
-	kpi, _ := usage.QueryDashboardKPI(days)
-	trends, _ := usage.QueryDashboardTrends(days)
+	kpi, _ := usage.QueryDashboardKPI(days, scope)
+	trends, _ := usage.QueryDashboardTrends(days, scope)
 
 	c.JSON(http.StatusOK, gin.H{
 		"kpi": gin.H{
@@ -81,6 +91,7 @@ func (h *Handler) GetDashboardSummary(c *gin.Context) {
 		"trends": trends,
 		"meta": gin.H{
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
+			"scoped":       scope.Restricted,
 		},
 		"days": days,
 	})

@@ -42,6 +42,8 @@ type LogQueryParams struct {
 	Size         int      // rows per page
 	Days         int      // time range in days
 	APIKey       string   // exact match filter
+	APIKeys      []string // optional IN (...) filter when APIKey is empty
+	MatchNone    bool     // force empty result set
 	Model        string   // exact match filter
 	Status       string   // "success", "failed", or "" (all)
 	AuthIndexes  []string // optional auth_index IN (...) filter
@@ -534,7 +536,7 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 }
 
 // QueryFilters returns the distinct API keys and models within the time range.
-func QueryFilters(days int) (FilterOptions, error) {
+func QueryFilters(days int, scope APIKeyScope) (FilterOptions, error) {
 	if days < 1 {
 		days = 7
 	}
@@ -549,11 +551,27 @@ func QueryFilters(days int) (FilterOptions, error) {
 		}, nil
 	}
 
+	if scope.Restricted && len(scope.Keys) == 0 {
+		return FilterOptions{
+			APIKeys:     make([]string, 0),
+			APIKeyNames: make(map[string]string),
+			Models:      make([]string, 0),
+			Channels:    make([]string, 0),
+		}, nil
+	}
+
 	cutoff := CutoffStartUTC(days).Format(time.RFC3339)
 
 	keys, err := queryDistinct(db, "api_key", cutoff)
 	if err != nil {
 		return FilterOptions{}, err
+	}
+	if scope.Restricted {
+		allowed := make(map[string]struct{}, len(scope.Keys))
+		for _, key := range scope.Keys {
+			allowed[key] = struct{}{}
+		}
+		keys = filterStrings(keys, allowed)
 	}
 	models, err := queryDistinct(db, "model", cutoff)
 	if err != nil {
@@ -815,7 +833,7 @@ type DashboardTrends struct {
 
 // QueryDashboardKPI returns aggregated KPI data from SQLite for the dashboard.
 // This replaces the old in-memory snapshot-based counting which lost data on restart.
-func QueryDashboardKPI(days int) (DashboardKPI, error) {
+func QueryDashboardKPI(days int, scope APIKeyScope) (DashboardKPI, error) {
 	db := getDB()
 	if db == nil {
 		return DashboardKPI{}, nil
@@ -823,8 +841,14 @@ func QueryDashboardKPI(days int) (DashboardKPI, error) {
 	if days < 1 {
 		days = 7
 	}
+	if scope.Restricted && len(scope.Keys) == 0 {
+		return DashboardKPI{}, nil
+	}
 
 	cutoff := CutoffStartUTC(days).Format(time.RFC3339)
+	where := " WHERE timestamp >= ?"
+	args := []interface{}{cutoff}
+	where, args = appendScopeSQL(where, args, scope)
 
 	var kpi DashboardKPI
 	err := db.QueryRow(`
@@ -838,9 +862,7 @@ func QueryDashboardKPI(days int) (DashboardKPI, error) {
 			COALESCE(SUM(cached_tokens), 0),
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(cost), 0)
-		FROM request_logs
-		WHERE timestamp >= ?
-	`, cutoff).Scan(
+		FROM request_logs`+where, args...).Scan(
 		&kpi.TotalRequests,
 		&kpi.SuccessRequests,
 		&kpi.FailedRequests,
@@ -877,13 +899,16 @@ const dashboardThroughputBucketCount = 7
 // QueryDashboardTrends returns fixed-width trend buckets used by the dashboard.
 // KPI trends follow the selected day range, while throughput always shows the
 // most recent 7 one-minute buckets.
-func QueryDashboardTrends(days int) (DashboardTrends, error) {
+func QueryDashboardTrends(days int, scope APIKeyScope) (DashboardTrends, error) {
 	db := getDB()
 	if db == nil {
 		return emptyDashboardTrends(days), nil
 	}
 	if days < 1 {
 		days = 7
+	}
+	if scope.Restricted && len(scope.Keys) == 0 {
+		return emptyDashboardTrends(days), nil
 	}
 
 	loc := getUsageLocation()
@@ -893,11 +918,13 @@ func QueryDashboardTrends(days int) (DashboardTrends, error) {
 		byKey[buckets[i].key] = &buckets[i]
 	}
 
+	where := " WHERE timestamp >= ?"
+	args := []interface{}{CutoffStartUTC(days).Format(time.RFC3339)}
+	where, args = appendScopeSQL(where, args, scope)
+
 	rows, err := db.Query(`
 		SELECT timestamp, failed, total_tokens
-		FROM request_logs
-		WHERE timestamp >= ?
-	`, CutoffStartUTC(days).Format(time.RFC3339))
+		FROM request_logs`+where, args...)
 	if err != nil {
 		return DashboardTrends{}, fmt.Errorf("usage: query dashboard trends: %w", err)
 	}
@@ -934,7 +961,7 @@ func QueryDashboardTrends(days int) (DashboardTrends, error) {
 		return DashboardTrends{}, fmt.Errorf("usage: iterate dashboard trends: %w", err)
 	}
 
-	throughputSeries, err := queryDashboardThroughputSeriesAt(time.Now(), loc)
+	throughputSeries, err := queryDashboardThroughputSeriesAt(time.Now(), loc, scope)
 	if err != nil {
 		return DashboardTrends{}, err
 	}
@@ -1009,9 +1036,12 @@ func buildRecentThroughputBucketsAt(now time.Time, loc *time.Location) []dashboa
 	return buckets
 }
 
-func queryDashboardThroughputSeriesAt(now time.Time, loc *time.Location) ([]DashboardThroughputPoint, error) {
+func queryDashboardThroughputSeriesAt(now time.Time, loc *time.Location, scope APIKeyScope) ([]DashboardThroughputPoint, error) {
 	db := getDB()
 	if db == nil {
+		return throughputSeriesFromBuckets(buildRecentThroughputBucketsAt(now, loc)), nil
+	}
+	if scope.Restricted && len(scope.Keys) == 0 {
 		return throughputSeriesFromBuckets(buildRecentThroughputBucketsAt(now, loc)), nil
 	}
 	if loc == nil {
@@ -1025,11 +1055,13 @@ func queryDashboardThroughputSeriesAt(now time.Time, loc *time.Location) ([]Dash
 	}
 
 	start := now.In(loc).Truncate(time.Minute).Add(-time.Duration(dashboardThroughputBucketCount-1) * time.Minute)
+	where := " WHERE timestamp >= ?"
+	args := []interface{}{start.UTC().Format(time.RFC3339)}
+	where, args = appendScopeSQL(where, args, scope)
+
 	rows, err := db.Query(`
 		SELECT timestamp, total_tokens
-		FROM request_logs
-		WHERE timestamp >= ?
-	`, start.UTC().Format(time.RFC3339))
+		FROM request_logs`+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("usage: query dashboard throughput trends: %w", err)
 	}
@@ -1180,6 +1212,10 @@ func buildWhereClause(params LogQueryParams) (string, []interface{}) {
 	conditions := make([]string, 0, 4)
 	args := make([]interface{}, 0, 4)
 
+	if params.MatchNone {
+		return " WHERE 1 = 0", args
+	}
+
 	// Time range: days=1 means "today", days=7 means "last 7 days", etc.
 	conditions = append(conditions, "timestamp >= ?")
 	args = append(args, CutoffStartUTC(params.Days).Format(time.RFC3339))
@@ -1204,6 +1240,8 @@ func buildWhereClause(params LogQueryParams) (string, []interface{}) {
 			conditions = append(conditions, "api_key = ?")
 			args = append(args, params.APIKey)
 		}
+	} else {
+		conditions, args = appendScopedAPIKeyConditions(conditions, args, params)
 	}
 	if params.Model != "" {
 		conditions = append(conditions, "model = ?")
@@ -1337,6 +1375,20 @@ func normalizeLogContentPart(part string) (string, error) {
 	default:
 		return "", fmt.Errorf("usage: invalid content part %q", part)
 	}
+}
+
+// GetRequestLogAPIKey returns the API key associated with a request log row.
+func GetRequestLogAPIKey(id int64) (string, error) {
+	db := getDB()
+	if db == nil {
+		return "", fmt.Errorf("usage: database not initialised")
+	}
+	var apiKey string
+	err := db.QueryRow("SELECT api_key FROM request_logs WHERE id = ?", id).Scan(&apiKey)
+	if err != nil {
+		return "", fmt.Errorf("usage: query log api_key: %w", err)
+	}
+	return apiKey, nil
 }
 
 // QueryLogContent retrieves the stored request/response content for a single log entry.
@@ -1528,17 +1580,24 @@ type ModelDistributionPoint struct {
 	Tokens   int64  `json:"tokens"`
 }
 
-// QueryDailySeries returns per-day aggregated request count and token usage for a given API key.
+// QueryDailySeries returns per-day aggregated request count and token usage.
 func QueryDailySeries(apiKey string, days int) ([]DailySeriesPoint, error) {
+	return QueryDailySeriesParams(LogQueryParams{APIKey: apiKey, Days: days})
+}
+
+// QueryDailySeriesParams returns per-day aggregates for the given query params.
+func QueryDailySeriesParams(params LogQueryParams) ([]DailySeriesPoint, error) {
 	db := getDB()
 	if db == nil {
 		return nil, nil
 	}
-	if days < 1 {
-		days = 7
+	if params.Days < 1 {
+		params.Days = 7
+	}
+	if params.MatchNone {
+		return []DailySeriesPoint{}, nil
 	}
 
-	params := LogQueryParams{APIKey: apiKey, Days: days}
 	where, args := buildWhereClause(params)
 
 	// NOTE: timestamps are stored as UTC RFC3339 strings; localtime converts them to the process timezone
@@ -1568,17 +1627,24 @@ func QueryDailySeries(apiKey string, days int) ([]DailySeriesPoint, error) {
 	return result, rows.Err()
 }
 
-// QueryModelDistribution returns request count and token usage grouped by model for a given API key.
+// QueryModelDistribution returns request count and token usage grouped by model.
 func QueryModelDistribution(apiKey string, days int) ([]ModelDistributionPoint, error) {
+	return QueryModelDistributionParams(LogQueryParams{APIKey: apiKey, Days: days})
+}
+
+// QueryModelDistributionParams returns model distribution for the given query params.
+func QueryModelDistributionParams(params LogQueryParams) ([]ModelDistributionPoint, error) {
 	db := getDB()
 	if db == nil {
 		return nil, nil
 	}
-	if days < 1 {
-		days = 7
+	if params.Days < 1 {
+		params.Days = 7
+	}
+	if params.MatchNone {
+		return []ModelDistributionPoint{}, nil
 	}
 
-	params := LogQueryParams{APIKey: apiKey, Days: days}
 	where, args := buildWhereClause(params)
 
 	q := `SELECT model,
@@ -1613,7 +1679,7 @@ type APIKeyDistributionPoint struct {
 }
 
 // QueryAPIKeyDistribution returns request count and token usage grouped by api_key.
-func QueryAPIKeyDistribution(days int) ([]APIKeyDistributionPoint, error) {
+func QueryAPIKeyDistribution(days int, scope APIKeyScope) ([]APIKeyDistributionPoint, error) {
 	db := getDB()
 	if db == nil {
 		return nil, nil
@@ -1621,8 +1687,14 @@ func QueryAPIKeyDistribution(days int) ([]APIKeyDistributionPoint, error) {
 	if days < 1 {
 		days = 7
 	}
+	if scope.Restricted && len(scope.Keys) == 0 {
+		return []APIKeyDistributionPoint{}, nil
+	}
 
 	params := LogQueryParams{Days: days}
+	if scope.Restricted {
+		params.APIKeys = append([]string(nil), scope.Keys...)
+	}
 	where, args := buildWhereClause(params)
 
 	q := `SELECT api_key,
@@ -1676,6 +1748,12 @@ type HourlyModelPoint struct {
 
 // QueryHourlySeries returns per-hour token and model aggregates for the last N hours.
 func QueryHourlySeries(apiKey string, hours int) ([]HourlyTokenPoint, []HourlyModelPoint, error) {
+	params := LogQueryParams{APIKey: apiKey}
+	return QueryHourlySeriesParams(params, hours)
+}
+
+// QueryHourlySeriesParams returns hourly aggregates for the given scoped query params.
+func QueryHourlySeriesParams(params LogQueryParams, hours int) ([]HourlyTokenPoint, []HourlyModelPoint, error) {
 	db := getDB()
 	if db == nil {
 		return nil, nil, nil
@@ -1683,18 +1761,19 @@ func QueryHourlySeries(apiKey string, hours int) ([]HourlyTokenPoint, []HourlyMo
 	if hours < 1 {
 		hours = 24
 	}
+	if params.MatchNone {
+		return []HourlyTokenPoint{}, []HourlyModelPoint{}, nil
+	}
 
 	cutoff := time.Now().Add(-time.Duration(hours) * time.Hour).UTC().Format(time.RFC3339)
 
-	// Build WHERE clause directly with the correct hourly cutoff.
-	// Previously this used buildWhereClause + strings.Replace, but that failed
-	// because buildWhereClause uses parameterised queries (? placeholders)
-	// so the time value lives in args, not in the where string.
 	conditions := []string{"timestamp >= ?"}
 	args := []interface{}{cutoff}
-	if apiKey != "" {
+	if strings.TrimSpace(params.APIKey) != "" {
 		conditions = append(conditions, "api_key = ?")
-		args = append(args, apiKey)
+		args = append(args, strings.TrimSpace(params.APIKey))
+	} else {
+		conditions, args = appendScopedAPIKeyConditions(conditions, args, params)
 	}
 	where := " WHERE " + strings.Join(conditions, " AND ")
 
@@ -1749,20 +1828,26 @@ type EntityStatPoint struct {
 }
 
 // QueryEntityStats returns aggregates grouped by a given column (e.g. "source" or "auth_index").
-// Time range is derived from days logic.
 func QueryEntityStats(apiKey string, days int, groupColumn string) ([]EntityStatPoint, error) {
+	return QueryEntityStatsParams(LogQueryParams{APIKey: apiKey, Days: days}, groupColumn)
+}
+
+// QueryEntityStatsParams returns entity stats for the given scoped query params.
+func QueryEntityStatsParams(params LogQueryParams, groupColumn string) ([]EntityStatPoint, error) {
 	db := getDB()
 	if db == nil {
 		return nil, nil
 	}
-	if days < 1 {
-		days = 7
+	if params.Days < 1 {
+		params.Days = 7
+	}
+	if params.MatchNone {
+		return []EntityStatPoint{}, nil
 	}
 	if groupColumn != "source" && groupColumn != "auth_index" {
 		return nil, fmt.Errorf("usage: invalid group column")
 	}
 
-	params := LogQueryParams{APIKey: apiKey, Days: days}
 	where, args := buildWhereClause(params)
 
 	q := fmt.Sprintf(`

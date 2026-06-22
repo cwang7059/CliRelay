@@ -42,6 +42,12 @@ type deleteUsageLogsRequest struct {
 // It enriches each log item with resolved api_key_name and channel_name
 // from the in-memory config, eliminating the need for multiple frontend API calls.
 func (h *Handler) GetUsageLogs(c *gin.Context) {
+	scope, err := h.resolveUsageScope(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	// Build name maps from config and auth store first so channel filtering can resolve
 	// to stable auth_index values (and reflect renamed OAuth channels).
 	keyNameMap, channelNameMap, authIndexChannelMap := h.buildNameMaps()
@@ -103,6 +109,10 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 		AuthIndexes:  authIndexes,
 		ChannelNames: channelNames,
 	}
+	params, ok := h.buildScopedLogQueryParams(c, scope, params)
+	if !ok {
+		return
+	}
 
 	result, err := usage.QueryLogs(params)
 	if err != nil {
@@ -110,7 +120,7 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 		return
 	}
 
-	filters, err := usage.QueryFilters(params.Days)
+	filters, err := usage.QueryFilters(params.Days, scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -359,10 +369,19 @@ func normalizeLogContentPartQuery(c *gin.Context) string {
 
 // GetLogContent returns the stored request/response content for a single log entry.
 func (h *Handler) GetLogContent(c *gin.Context) {
+	scope, err := h.resolveUsageScope(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	idStr := c.Param("id")
 	id, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
 	if err != nil || id < 1 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log id"})
+		return
+	}
+	if !h.ensureLogContentAccess(c, scope, id) {
 		return
 	}
 
@@ -601,10 +620,20 @@ func (h *Handler) GetPublicLogContent(c *gin.Context) {
 // GetUsageChartData returns pre-aggregated chart data for the management portal.
 // It applies an optional apiKey filter.
 func (h *Handler) GetUsageChartData(c *gin.Context) {
+	scope, err := h.resolveUsageScope(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	apiKey := strings.TrimSpace(c.Query("api_key"))
 	days := intQueryDefault(c, "days", 7)
+	params, ok := h.buildScopedChartQueryParams(c, scope, apiKey, days)
+	if !ok {
+		return
+	}
 
-	daily, err := usage.QueryDailySeries(apiKey, days)
+	daily, err := usage.QueryDailySeriesParams(params)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -613,7 +642,7 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 		daily = []usage.DailySeriesPoint{}
 	}
 
-	models, err := usage.QueryModelDistribution(apiKey, days)
+	models, err := usage.QueryModelDistributionParams(params)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -622,7 +651,7 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 		models = []usage.ModelDistributionPoint{}
 	}
 
-	hourlyTokens, hourlyModels, err := usage.QueryHourlySeries(apiKey, 24)
+	hourlyTokens, hourlyModels, err := usage.QueryHourlySeriesParams(params, 24)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -634,10 +663,10 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 		hourlyModels = []usage.HourlyModelPoint{}
 	}
 
-	// API Key distribution (only when not filtered by a single key)
+	// API Key distribution when aggregating across multiple keys.
 	var apikeyDist []usage.APIKeyDistributionPoint
-	if apiKey == "" {
-		apikeyDist, err = usage.QueryAPIKeyDistribution(days)
+	if strings.TrimSpace(params.APIKey) == "" {
+		apikeyDist, err = usage.QueryAPIKeyDistribution(days, scope)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -668,10 +697,20 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 
 // GetEntityUsageStats returns aggregated statistics grouped by source or auth_index
 func (h *Handler) GetEntityUsageStats(c *gin.Context) {
+	scope, err := h.resolveUsageScope(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	apiKey := strings.TrimSpace(c.Query("api_key"))
 	days := intQueryDefault(c, "days", 7)
+	params, ok := h.buildScopedChartQueryParams(c, scope, apiKey, days)
+	if !ok {
+		return
+	}
 
-	sourceStats, err := usage.QueryEntityStats(apiKey, days, "source")
+	sourceStats, err := usage.QueryEntityStatsParams(params, "source")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -680,7 +719,7 @@ func (h *Handler) GetEntityUsageStats(c *gin.Context) {
 		sourceStats = []usage.EntityStatPoint{}
 	}
 
-	authIndexStats, err := usage.QueryEntityStats(apiKey, days, "auth_index")
+	authIndexStats, err := usage.QueryEntityStatsParams(params, "auth_index")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

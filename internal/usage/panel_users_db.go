@@ -380,13 +380,6 @@ func UpdatePanelUserPassword(id, newPassword string) error {
 	return nil
 }
 
-func boolToInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
-}
-
 // CreatePanelSession issues a new session token for a user.
 func CreatePanelSession(userID, ip, userAgent string) (PanelSession, error) {
 	db := getDB()
@@ -502,6 +495,12 @@ func SetPanelUserAPIKeys(userID string, apiKeyIDs []string) error {
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO panel_user_api_keys (user_id, api_key_id) VALUES (?, ?)`,
+			userID, keyID,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`UPDATE api_keys SET owner_user_id = ? WHERE key = ?`,
 			userID, keyID,
 		); err != nil {
 			return err

@@ -23,7 +23,7 @@ func TestQueryDashboardTrendsReturnsFixedDailyBuckets(t *testing.T) {
 		TotalTokens:  90,
 	}, "", "")
 
-	trends, err := QueryDashboardTrends(7)
+	trends, err := QueryDashboardTrends(7, OpenScope())
 	if err != nil {
 		t.Fatalf("QueryDashboardTrends() error = %v", err)
 	}
@@ -98,7 +98,7 @@ func TestQueryDashboardTrendsReturnsRecentMinuteThroughputBuckets(t *testing.T) 
 		TotalTokens:  70,
 	}, "", "")
 
-	trends, err := QueryDashboardTrends(7)
+	trends, err := QueryDashboardTrends(7, OpenScope())
 	if err != nil {
 		t.Fatalf("QueryDashboardTrends() error = %v", err)
 	}

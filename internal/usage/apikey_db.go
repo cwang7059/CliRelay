@@ -26,6 +26,7 @@ type APIKeyRow struct {
 	AllowedChannels      []string `json:"allowed-channels,omitempty"`
 	AllowedChannelGroups []string `json:"allowed-channel-groups,omitempty"`
 	SystemPrompt         string   `json:"system-prompt,omitempty"`
+	OwnerUserID          string   `json:"owner-user-id,omitempty"`
 	CreatedAt            string   `json:"created-at,omitempty"`
 	UpdatedAt            string   `json:"updated-at,omitempty"`
 }
@@ -105,6 +106,7 @@ func migrateAPIKeyColumns(db *sql.DB) {
 	}{
 		{name: "allowed_channels", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{name: "allowed_channel_groups", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{name: "owner_user_id", definition: "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if _, err := db.Exec("ALTER TABLE api_keys ADD COLUMN " + col.name + " " + col.definition); err != nil {
 			if !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
@@ -330,7 +332,7 @@ func ListAPIKeys() []APIKeyRow {
 
 	rows, err := db.Query(`SELECT key, name, disabled, daily_limit, total_quota,
 		spending_limit, concurrency_limit, rpm_limit, tpm_limit,
-		allowed_models, allowed_channels, allowed_channel_groups, system_prompt, created_at, updated_at
+		allowed_models, allowed_channels, allowed_channel_groups, system_prompt, owner_user_id, created_at, updated_at
 		FROM api_keys ORDER BY created_at ASC`)
 	if err != nil {
 		log.Errorf("usage: list api_keys: %v", err)
@@ -350,7 +352,7 @@ func GetAPIKey(key string) *APIKeyRow {
 
 	row := db.QueryRow(`SELECT key, name, disabled, daily_limit, total_quota,
 		spending_limit, concurrency_limit, rpm_limit, tpm_limit,
-		allowed_models, allowed_channels, allowed_channel_groups, system_prompt, created_at, updated_at
+		allowed_models, allowed_channels, allowed_channel_groups, system_prompt, owner_user_id, created_at, updated_at
 		FROM api_keys WHERE key = ?`, key)
 
 	return scanSingleAPIKeyRow(row)
@@ -519,7 +521,7 @@ func scanAPIKeyFromRow(row scannable) *APIKeyRow {
 		&r.Key, &r.Name, &disabledInt,
 		&r.DailyLimit, &r.TotalQuota, &r.SpendingLimit,
 		&r.ConcurrencyLimit, &r.RPMLimit, &r.TPMLimit,
-		&modelsJSON, &channelsJSON, &channelGroupsJSON, &r.SystemPrompt,
+		&modelsJSON, &channelsJSON, &channelGroupsJSON, &r.SystemPrompt, &r.OwnerUserID,
 		&r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return nil
@@ -547,7 +549,7 @@ func scanSingleAPIKeyRow(row *sql.Row) *APIKeyRow {
 		&r.Key, &r.Name, &disabledInt,
 		&r.DailyLimit, &r.TotalQuota, &r.SpendingLimit,
 		&r.ConcurrencyLimit, &r.RPMLimit, &r.TPMLimit,
-		&modelsJSON, &channelsJSON, &channelGroupsJSON, &r.SystemPrompt,
+		&modelsJSON, &channelsJSON, &channelGroupsJSON, &r.SystemPrompt, &r.OwnerUserID,
 		&r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return nil

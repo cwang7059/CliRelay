@@ -22,9 +22,15 @@ type usageImportPayload struct {
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	scope, err := h.resolveUsageScope(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		snapshot = filterUsageSnapshot(h.usageStats.Snapshot(), scope)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
