@@ -38,16 +38,32 @@ func (h *Handler) GetConfig(c *gin.Context) {
 
 func (h *Handler) PutManagementSecretKey(c *gin.Context) {
 	var body struct {
-		Value *string `json:"value"`
+		CurrentValue *string `json:"currentValue"`
+		Value        *string `json:"value"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+	if err := c.ShouldBindJSON(&body); err != nil || body.CurrentValue == nil || body.Value == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
 
+	currentKey := strings.TrimSpace(*body.CurrentValue)
 	nextKey := strings.TrimSpace(*body.Value)
+	if currentKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "current management key cannot be empty"})
+		return
+	}
 	if nextKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "management key cannot be empty"})
+		return
+	}
+	if currentKey == nextKey {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new management key must be different from the current key"})
+		return
+	}
+
+	secretHash := strings.TrimSpace(h.cfg.RemoteManagement.SecretKey)
+	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(currentKey)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "current management key is invalid"})
 		return
 	}
 
