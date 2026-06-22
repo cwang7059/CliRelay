@@ -3,8 +3,10 @@ setlocal
 
 cd /d "%~dp0"
 
-set "PORT=8317"
-set "BACKEND_BASE=http://127.0.0.1:%PORT%"
+rem Default to remote CliRelay. Override with: set CLIRELAY_BACKEND_BASE=http://127.0.0.1:8317
+if not defined CLIRELAY_BACKEND_BASE set "CLIRELAY_BACKEND_BASE=http://67.215.253.110:8317"
+
+set "BACKEND_BASE=%CLIRELAY_BACKEND_BASE%"
 set "MANAGE_URL=%BACKEND_BASE%/manage"
 set "LOCAL_ELECTRON_ROOT=%~dp0..\codeProxy-electron-api-key-reveal"
 set "ELECTRON_ROOT=%~dp0..\codeProxy"
@@ -16,14 +18,36 @@ set "ELECTRON_BAT=%ELECTRON_ROOT%\start-electron-admin.bat"
 set "ELECTRON_CMD=%ELECTRON_ROOT%\start-electron-admin.cmd"
 set "ELECTRON_PREVIEW=%ELECTRON_ROOT%\scripts\electron-preview.mjs"
 
-call :StartBackend
-if errorlevel 1 exit /b 1
+echo CliRelay backend: %BACKEND_BASE%
+
+rem Only start local CliRelay when targeting localhost.
+echo %BACKEND_BASE% | findstr /I /C:"127.0.0.1" /C:"localhost" >nul
+if not errorlevel 1 (
+    call :StartBackend
+    if errorlevel 1 exit /b 1
+) else (
+    echo Skipping local CliRelay start ^(using remote backend^).
+)
 
 call :CloseOldClientWindows
 
 set "CODE_PROXY_API_BASE=%BACKEND_BASE%"
 set "CODE_PROXY_ADMIN_URL="
 set "ELECTRON_RENDERER_URL="
+
+if exist "%USERPROFILE%\.bun\bin\bun.exe" if exist "%ELECTRON_ROOT%\scripts\electron-preview.mjs" (
+    echo Building and opening Electron preview ^(latest UI, remote backend^)...
+    pushd "%ELECTRON_ROOT%"
+    "%USERPROFILE%\.bun\bin\bun.exe" run build
+    if errorlevel 1 (
+        popd
+        exit /b 1
+    )
+    "%USERPROFILE%\.bun\bin\bun.exe" scripts\electron-preview.mjs
+    set "PREVIEW_EXIT=%ERRORLEVEL%"
+    popd
+    exit /b %PREVIEW_EXIT%
+)
 
 if /I "%ELECTRON_ROOT%"=="%LOCAL_ELECTRON_ROOT%" if exist "%USERPROFILE%\.bun\bin\bun.exe" if exist "%ELECTRON_PREVIEW%" (
     echo Building and opening latest Electron client from local feature worktree...
@@ -63,11 +87,11 @@ start "" "%MANAGE_URL%"
 exit /b 0
 
 :StartBackend
-echo Starting CliRelay backend if needed...
+echo Starting local CliRelay backend if needed...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-clirelay.ps1"
 if errorlevel 1 (
     echo.
-    echo Failed to start CliRelay backend.
+    echo Failed to start local CliRelay backend.
     echo Check start-clirelay.ps1 output above.
     pause
     exit /b 1
