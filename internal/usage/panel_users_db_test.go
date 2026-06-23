@@ -59,4 +59,15 @@ func TestPanelUsersAuthFlow(t *testing.T) {
 	if err != nil || allowed {
 		t.Fatalf("expected user to not own sk-other, allowed=%v err=%v", allowed, err)
 	}
+
+	users, err := ListPanelUsers()
+	if err != nil {
+		t.Fatalf("ListPanelUsers() error = %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("ListPanelUsers() len = %d, want 1", len(users))
+	}
+	if len(users[0].APIKeyIDs) != 1 || users[0].APIKeyIDs[0] != "sk-alice" {
+		t.Fatalf("ListPanelUsers() api_key_ids = %v, want [sk-alice]", users[0].APIKeyIDs)
+	}
 }

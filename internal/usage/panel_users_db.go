@@ -304,13 +304,21 @@ func ListPanelUsers() ([]PanelUser, error) {
 		if err != nil {
 			return nil, err
 		}
-		apiKeys, listErr := ListPanelUserAPIKeyIDs(user.ID)
-		if listErr == nil {
-			user.APIKeyIDs = apiKeys
-		}
 		users = append(users, user)
 	}
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Avoid nested queries while the result set is still open. With SQLite this
+	// can stall the management /users endpoint when we fetch per-user bindings.
+	for i := range users {
+		apiKeys, listErr := ListPanelUserAPIKeyIDs(users[i].ID)
+		if listErr == nil {
+			users[i].APIKeyIDs = apiKeys
+		}
+	}
+	return users, nil
 }
 
 // UpdatePanelUser updates role/disabled state.
