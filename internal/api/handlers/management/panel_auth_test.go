@@ -12,6 +12,11 @@ func TestPanelUserAllowedGET(t *testing.T) {
 	}{
 		{"/dashboard-summary", true},
 		{"/usage/logs", true},
+		{"/model-configs", true},
+		{"/model-configs?scope=library", true},
+		{"/model-owner-presets", true},
+		{"/model-openrouter-sync", true},
+		{"/model-pricing", true},
 		{"/config", false},
 		{"/management-key", false},
 		{"/users", false},
