@@ -25,6 +25,13 @@ type panelBootstrapRequest struct {
 	Password string `json:"password"`
 }
 
+type panelRegisterRequest struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	Email       string `json:"email"`
+	DisplayName string `json:"display_name"`
+}
+
 func (h *Handler) PostPanelLogin(c *gin.Context) {
 	var req panelLoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -73,13 +80,24 @@ func (h *Handler) GetPanelMe(c *gin.Context) {
 	userID := panelUserIDFromContext(c)
 	authMode, _ := c.Get(ctxPanelAuthMode)
 	mode, _ := authMode.(string)
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"username":    name,
 		"role":        role,
 		"user_id":     userID,
 		"auth_mode":   mode,
 		"permissions": panelPermissionsForRole(role),
-	})
+	}
+	if userID != "" {
+		if user, err := usage.GetPanelUserByID(userID); err == nil {
+			if user.Email != "" {
+				response["email"] = user.Email
+			}
+			if user.DisplayName != "" {
+				response["display_name"] = user.DisplayName
+			}
+		}
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) PutPanelPassword(c *gin.Context) {
@@ -139,7 +157,7 @@ func (h *Handler) PostPanelBootstrap(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	user, err := usage.CreatePanelUser(req.Username, req.Password, usage.PanelRoleAdmin)
+	user, err := usage.CreatePanelUser(req.Username, req.Password, usage.PanelRoleAdmin, "", "")
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, usage.ErrPanelUserExists) {
@@ -152,6 +170,42 @@ func (h *Handler) PostPanelBootstrap(c *gin.Context) {
 		"id":       user.ID,
 		"username": user.Username,
 		"role":     user.Role,
+	})
+}
+
+// PostPanelRegister creates a regular user account without admin approval.
+// API keys must still be assigned by an administrator before the user can call models.
+func (h *Handler) PostPanelRegister(c *gin.Context) {
+	var req panelRegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	user, err := usage.RegisterPanelUser(req.Username, req.Password, req.Email, req.DisplayName)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, usage.ErrPanelUserExists):
+			status = http.StatusConflict
+		case errors.Is(err, usage.ErrPanelEmailExists):
+			status = http.StatusConflict
+		case errors.Is(err, usage.ErrPanelInvalidEmail):
+			status = http.StatusBadRequest
+		default:
+			message := strings.TrimSpace(err.Error())
+			if strings.Contains(message, "required") {
+				status = http.StatusBadRequest
+			}
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"id":           user.ID,
+		"username":     user.Username,
+		"email":        user.Email,
+		"display_name": user.DisplayName,
+		"role":         user.Role,
 	})
 }
 

@@ -622,6 +622,7 @@ func (s *Server) registerManagementRoutes() {
 		authPublic := mgmt.Group("/auth")
 		authPublic.Use(bodyutil.LimitBodyMiddleware(bodyutil.ManagementBodyLimit))
 		authPublic.POST("/login", s.mgmt.PostPanelLogin)
+		authPublic.POST("/register", s.mgmt.PostPanelRegister)
 		authPublic.POST("/bootstrap", s.mgmt.PostPanelBootstrap)
 
 		protected := mgmt.Group("")

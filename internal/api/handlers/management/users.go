@@ -10,10 +10,12 @@ import (
 )
 
 type panelCreateUserRequest struct {
-	Username string   `json:"username"`
-	Password string   `json:"password"`
-	Role     string   `json:"role"`
-	APIKeyIDs []string `json:"api_key_ids,omitempty"`
+	Username    string   `json:"username"`
+	Password    string   `json:"password"`
+	Email       string   `json:"email,omitempty"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Role        string   `json:"role"`
+	APIKeyIDs   []string `json:"api_key_ids,omitempty"`
 }
 
 type panelUpdateUserRequest struct {
@@ -52,11 +54,14 @@ func (h *Handler) PostPanelUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	user, err := usage.CreatePanelUser(req.Username, req.Password, req.Role)
+	user, err := usage.CreatePanelUser(req.Username, req.Password, req.Role, req.Email, req.DisplayName)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, usage.ErrPanelUserExists) {
+		switch {
+		case errors.Is(err, usage.ErrPanelUserExists), errors.Is(err, usage.ErrPanelEmailExists):
 			status = http.StatusConflict
+		case errors.Is(err, usage.ErrPanelInvalidEmail):
+			status = http.StatusBadRequest
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return

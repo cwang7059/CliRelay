@@ -16,7 +16,7 @@ func TestPanelUsersAuthFlow(t *testing.T) {
 	}
 	t.Cleanup(CloseDB)
 
-	user, err := CreatePanelUser("alice", "secret-pass", PanelRoleUser)
+	user, err := CreatePanelUser("alice", "secret-pass", PanelRoleUser, "alice@example.com", "Alice")
 	if err != nil {
 		t.Fatalf("CreatePanelUser() error = %v", err)
 	}
@@ -69,5 +69,49 @@ func TestPanelUsersAuthFlow(t *testing.T) {
 	}
 	if len(users[0].APIKeyIDs) != 1 || users[0].APIKeyIDs[0] != "sk-alice" {
 		t.Fatalf("ListPanelUsers() api_key_ids = %v, want [sk-alice]", users[0].APIKeyIDs)
+	}
+}
+
+func TestRegisterPanelUser(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "usage.db")
+	if err := InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	t.Cleanup(CloseDB)
+
+	user, err := RegisterPanelUser("bob", "secret-pass", "bob@example.com", "Bob")
+	if err != nil {
+		t.Fatalf("RegisterPanelUser() error = %v", err)
+	}
+	if user.Role != PanelRoleUser {
+		t.Fatalf("role = %q, want %q", user.Role, PanelRoleUser)
+	}
+	if user.Email != "bob@example.com" {
+		t.Fatalf("email = %q, want bob@example.com", user.Email)
+	}
+	if user.DisplayName != "Bob" {
+		t.Fatalf("display_name = %q, want Bob", user.DisplayName)
+	}
+	if user.Disabled {
+		t.Fatal("expected registered user to be enabled")
+	}
+
+	if _, err := RegisterPanelUser("bob", "other-pass", "other@example.com", ""); err == nil {
+		t.Fatal("expected duplicate username to fail")
+	}
+	if _, err := RegisterPanelUser("carol", "secret-pass", "bob@example.com", ""); err == nil {
+		t.Fatal("expected duplicate email to fail")
+	}
+	if _, err := RegisterPanelUser("carol", "secret-pass", "", ""); err == nil {
+		t.Fatal("expected missing email to fail")
+	}
+
+	authUser, err := AuthenticatePanelUser("bob", "secret-pass")
+	if err != nil {
+		t.Fatalf("AuthenticatePanelUser() error = %v", err)
+	}
+	if authUser.Username != "bob" {
+		t.Fatalf("authenticated username = %q", authUser.Username)
 	}
 }

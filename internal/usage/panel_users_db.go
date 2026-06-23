@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,24 +26,28 @@ const (
 )
 
 var (
-	ErrPanelUserNotFound      = errors.New("panel user not found")
-	ErrPanelUserExists        = errors.New("panel username already exists")
-	ErrPanelInvalidCredentials = errors.New("invalid username or password")
-	ErrPanelUserDisabled      = errors.New("panel user disabled")
-	ErrPanelSessionNotFound   = errors.New("panel session not found")
+	ErrPanelUserNotFound        = errors.New("panel user not found")
+	ErrPanelUserExists          = errors.New("panel username already exists")
+	ErrPanelEmailExists         = errors.New("panel email already exists")
+	ErrPanelInvalidEmail        = errors.New("invalid email address")
+	ErrPanelInvalidCredentials  = errors.New("invalid username or password")
+	ErrPanelUserDisabled        = errors.New("panel user disabled")
+	ErrPanelSessionNotFound     = errors.New("panel session not found")
 	ErrPanelBootstrapNotAllowed = errors.New("panel bootstrap not allowed")
 )
 
 // PanelUser represents a management panel operator account.
 type PanelUser struct {
-	ID           string `json:"id"`
-	Username     string `json:"username"`
-	Role         string `json:"role"`
-	Disabled     bool   `json:"disabled"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
-	LastLoginAt  string `json:"last_login_at,omitempty"`
-	APIKeyIDs    []string `json:"api_key_ids,omitempty"`
+	ID          string   `json:"id"`
+	Username    string   `json:"username"`
+	Email       string   `json:"email,omitempty"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Role        string   `json:"role"`
+	Disabled    bool     `json:"disabled"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+	LastLoginAt string   `json:"last_login_at,omitempty"`
+	APIKeyIDs   []string `json:"api_key_ids,omitempty"`
 }
 
 // PanelSession represents an authenticated panel session.
@@ -58,6 +64,8 @@ const createPanelUsersTableSQL = `
 CREATE TABLE IF NOT EXISTS panel_users (
   id            TEXT PRIMARY KEY NOT NULL,
   username      TEXT NOT NULL UNIQUE,
+  email         TEXT,
+  display_name  TEXT NOT NULL DEFAULT '',
   password_hash TEXT NOT NULL,
   role          TEXT NOT NULL CHECK(role IN ('admin', 'user')),
   disabled      INTEGER NOT NULL DEFAULT 0,
@@ -101,6 +109,26 @@ func initPanelUsersTables(db *sql.DB) {
 			log.Errorf("usage: create panel users table: %v", err)
 		}
 	}
+	migratePanelUserColumns(db)
+}
+
+func migratePanelUserColumns(db *sql.DB) {
+	for _, migration := range []struct {
+		name string
+		sql  string
+	}{
+		{name: "email", sql: "ALTER TABLE panel_users ADD COLUMN email TEXT"},
+		{name: "display_name", sql: "ALTER TABLE panel_users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"},
+	} {
+		if _, err := db.Exec(migration.sql); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+				log.Warnf("usage: migrate panel_users column %s: %v", migration.name, err)
+			}
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_panel_users_email ON panel_users(email) WHERE email IS NOT NULL AND trim(email) != ''`); err != nil {
+		log.Warnf("usage: create panel_users email index: %v", err)
+	}
 }
 
 func panelNowRFC3339() string {
@@ -126,6 +154,25 @@ func normalizePanelUsername(username string) string {
 	return strings.TrimSpace(username)
 }
 
+func normalizePanelDisplayName(displayName string) string {
+	return strings.TrimSpace(displayName)
+}
+
+var panelEmailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+
+func normalizePanelEmail(email string) (sql.NullString, error) {
+	trimmed := strings.TrimSpace(strings.ToLower(email))
+	if trimmed == "" {
+		return sql.NullString{}, nil
+	}
+	if !panelEmailPattern.MatchString(trimmed) {
+		if _, err := mail.ParseAddress(trimmed); err != nil {
+			return sql.NullString{}, ErrPanelInvalidEmail
+		}
+	}
+	return sql.NullString{String: trimmed, Valid: true}, nil
+}
+
 func normalizePanelRole(role string) string {
 	role = strings.TrimSpace(strings.ToLower(role))
 	if role == PanelRoleAdmin {
@@ -147,15 +194,20 @@ func PanelUserCount() (int, error) {
 	return count, nil
 }
 
+const panelUserSelectColumns = `id, username, email, display_name, role, disabled, created_at, updated_at, last_login_at`
+
 func scanPanelUser(row interface {
 	Scan(dest ...any) error
 }) (PanelUser, error) {
 	var user PanelUser
 	var disabled int
+	var email sql.NullString
 	var lastLogin sql.NullString
 	if err := row.Scan(
 		&user.ID,
 		&user.Username,
+		&email,
+		&user.DisplayName,
 		&user.Role,
 		&disabled,
 		&user.CreatedAt,
@@ -164,6 +216,9 @@ func scanPanelUser(row interface {
 	); err != nil {
 		return PanelUser{}, err
 	}
+	if email.Valid {
+		user.Email = email.String
+	}
 	user.Disabled = disabled != 0
 	if lastLogin.Valid {
 		user.LastLoginAt = lastLogin.String
@@ -171,8 +226,31 @@ func scanPanelUser(row interface {
 	return user, nil
 }
 
+func mapPanelUserInsertError(err error) error {
+	if err == nil {
+		return nil
+	}
+	lowered := strings.ToLower(err.Error())
+	if strings.Contains(lowered, "idx_panel_users_email") || strings.Contains(lowered, "panel_users.email") {
+		return ErrPanelEmailExists
+	}
+	if strings.Contains(lowered, "unique") || strings.Contains(lowered, "constraint") {
+		return ErrPanelUserExists
+	}
+	return err
+}
+
 // CreatePanelUser inserts a new panel user.
-func CreatePanelUser(username, password, role string) (PanelUser, error) {
+func CreatePanelUser(username, password, role, email, displayName string) (PanelUser, error) {
+	return insertPanelUser(username, password, role, email, displayName, false)
+}
+
+// RegisterPanelUser creates a regular user account for self-service registration.
+func RegisterPanelUser(username, password, email, displayName string) (PanelUser, error) {
+	return insertPanelUser(username, password, PanelRoleUser, email, displayName, true)
+}
+
+func insertPanelUser(username, password, role, email, displayName string, requireEmail bool) (PanelUser, error) {
 	db := getDB()
 	if db == nil {
 		return PanelUser{}, errors.New("usage database not initialized")
@@ -185,6 +263,13 @@ func CreatePanelUser(username, password, role string) (PanelUser, error) {
 		return PanelUser{}, fmt.Errorf("password is required")
 	}
 	role = normalizePanelRole(role)
+	normalizedEmail, err := normalizePanelEmail(email)
+	if err != nil {
+		return PanelUser{}, err
+	}
+	if requireEmail && !normalizedEmail.Valid {
+		return PanelUser{}, fmt.Errorf("email is required")
+	}
 
 	passwordHash, err := hashPanelPassword(password)
 	if err != nil {
@@ -193,22 +278,30 @@ func CreatePanelUser(username, password, role string) (PanelUser, error) {
 
 	now := panelNowRFC3339()
 	user := PanelUser{
-		ID:        uuid.NewString(),
-		Username:  username,
-		Role:      role,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          uuid.NewString(),
+		Username:    username,
+		DisplayName: normalizePanelDisplayName(displayName),
+		Role:        role,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if normalizedEmail.Valid {
+		user.Email = normalizedEmail.String
 	}
 	_, err = db.Exec(
-		`INSERT INTO panel_users (id, username, password_hash, role, disabled, created_at, updated_at, last_login_at)
-		 VALUES (?, ?, ?, ?, 0, ?, ?, '')`,
-		user.ID, user.Username, passwordHash, user.Role, user.CreatedAt, user.UpdatedAt,
+		`INSERT INTO panel_users (id, username, email, display_name, password_hash, role, disabled, created_at, updated_at, last_login_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, '')`,
+		user.ID,
+		user.Username,
+		normalizedEmail,
+		user.DisplayName,
+		passwordHash,
+		user.Role,
+		user.CreatedAt,
+		user.UpdatedAt,
 	)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return PanelUser{}, ErrPanelUserExists
-		}
-		return PanelUser{}, err
+		return PanelUser{}, mapPanelUserInsertError(err)
 	}
 	return user, nil
 }
@@ -244,8 +337,7 @@ func GetPanelUserByUsername(username string) (PanelUser, error) {
 	}
 	username = normalizePanelUsername(username)
 	row := db.QueryRow(
-		`SELECT id, username, role, disabled, created_at, updated_at, last_login_at
-		 FROM panel_users WHERE username = ?`,
+		`SELECT `+panelUserSelectColumns+` FROM panel_users WHERE username = ?`,
 		username,
 	)
 	user, err := scanPanelUser(row)
@@ -265,8 +357,7 @@ func GetPanelUserByID(id string) (PanelUser, error) {
 		return PanelUser{}, errors.New("usage database not initialized")
 	}
 	row := db.QueryRow(
-		`SELECT id, username, role, disabled, created_at, updated_at, last_login_at
-		 FROM panel_users WHERE id = ?`,
+		`SELECT `+panelUserSelectColumns+` FROM panel_users WHERE id = ?`,
 		strings.TrimSpace(id),
 	)
 	user, err := scanPanelUser(row)
@@ -290,8 +381,7 @@ func ListPanelUsers() ([]PanelUser, error) {
 		return nil, errors.New("usage database not initialized")
 	}
 	rows, err := db.Query(
-		`SELECT id, username, role, disabled, created_at, updated_at, last_login_at
-		 FROM panel_users ORDER BY username COLLATE NOCASE`,
+		`SELECT `+panelUserSelectColumns+` FROM panel_users ORDER BY username COLLATE NOCASE`,
 	)
 	if err != nil {
 		return nil, err
