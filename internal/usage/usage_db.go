@@ -283,8 +283,11 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 		return fmt.Errorf("usage: open sqlite: %w", err)
 	}
 
-	db.SetMaxOpenConns(1) // SQLite performs best with a single writer
-	db.SetMaxIdleConns(1)
+	// A single shared connection can starve management reads when long-lived
+	// request logging / streaming-related work is in flight. Keep the pool small
+	// but allow a few concurrent readers so panel auth and stats do not hang.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 
 	// Verify connectivity with a timeout to avoid hanging on WAL recovery
 	log.Debugf("usage: pinging database to verify connectivity")
